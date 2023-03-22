@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.1] - 2023-03-22
+
 ### Added
 
 - Self-Custodial CFD Trading based on DLC and lightning
+
+[Unreleased]: https://github.com/holzeis/10101/compare/0.0.1...HEAD
+[0.0.1]: https://github.com/holzeis/10101/compare/209217e1014baa106d7ebe5183cfc6bdc8a4ed5a...0.0.1
