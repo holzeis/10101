@@ -69,13 +69,63 @@ jobs:
         run: just gen
 
       - name: Add Rust targets
-        run: rustup target add armv7-linux-androideabi aarch64-linux-android
+        run: rustup target add armv7-linux-androideabi aarch64-linux-android aarch64-apple-ios x86_64-apple-ios
 
+      # Build ios release
+      - name: Install `cargo-lipo`
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: cargo install cargo-lipo --force
+
+      # Install the Apple certificate and provisioning profile
+      - name: Install the Apple certificate and provisioning profile
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.APPSTORE_CERT_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPSTORE_CERT_PASSWORD }}
+          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.MOBILEPROVISION_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          # create variables
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          # import certificate and provisioning profile from secrets
+          echo $BUILD_CERTIFICATE_BASE64 | base64 -d > $CERTIFICATE_PATH
+          echo $BUILD_PROVISION_PROFILE_BASE64 | base64 -d > $PP_PATH
+          # create temporary keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          # import certificate to keychain
+          security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+          # apply provisioning profile
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles
+
+      - name: Build iOS Archive
+        id: build-ios
+        run: |
+          cd mobile
+          flutter build ipa --release --dart-define="ELECTRS_ENDPOINT=${{ env.ELECTRS_ENDPOINT }}" --dart-define="COORDINATOR_P2P_ENDPOINT=${{ env.COORDINATOR_P2P_ENDPOINT }}" --dart-define="COMMIT=$(git rev-parse HEAD)" --dart-define="BRANCH=$(git rev-parse --abbrev-ref HEAD)"
+
+      - name: Release to TestFlight
+        run: |
+          cd mobile
+          xcrun altool --upload-app --type ios --file ./build/ios/ipa/10101.ipa --apiKey ${ALTOOL_API_KEY} --apiIssuer ${ALTOOL_API_ISSUER}
+
+      # Important! Cleanup: remove the certificate and provisioning profile from the runner!
+      - name: Clean up keychain and provisioning profile
+        if: ${{ always() }}
+        run: |
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db
+          rm ~/Library/MobileDevice/Provisioning\ Profiles/build_pp.mobileprovision
+
+      # Build android release
       - name: Install `cargo-ndk`
         if: steps.cache-deps.outputs.cache-hit != 'true'
         run: cargo install cargo-ndk --force
 
-      - name: Build Rust lib
+      - name: Build Android Rust lib
         working-directory: ./mobile/native
         run: cargo ndk -o ../android/app/src/main/jniLibs build
 
@@ -87,14 +137,14 @@ jobs:
           key-path: '["version"]'
 
       - name: Build Android APK release
-        id: build
+        id: build-android
         run: |
           mkdir keystore
           echo $ENCODED_KEYSTORE | base64 -d > keystore/upload-keystore.jks
           BUILD_NAME=${{ steps.version.outputs.data }}
           BUILD_NUMBER=$(git rev-list HEAD --count)
           cd mobile
-          flutter build apk --dart-define="ELECTRS_ENDPOINT=${{ env.ELECTRS_ENDPOINT }}" --dart-define="COORDINATOR_P2P_ENDPOINT=${{ env.COORDINATOR_P2P_ENDPOINT }}" --build-name=$BUILD_NAME --build-number=$BUILD_NUMBER --release
+          flutter build apk --dart-define="ELECTRS_ENDPOINT=${{ env.ELECTRS_ENDPOINT }}" --dart-define="COORDINATOR_P2P_ENDPOINT=${{ env.COORDINATOR_P2P_ENDPOINT }}" --dart-define="COMMIT=$(git rev-parse HEAD)" --dart-define="BRANCH=$(git rev-parse --abbrev-ref HEAD)" --build-name=$BUILD_NAME --build-number=$BUILD_NUMBER --release
           mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/get10101-$BUILD_NAME.apk
           echo "ANDROID_APK_NAME=$(echo get10101-$BUILD_NAME.apk)" >> $GITHUB_OUTPUT
         env:
@@ -106,7 +156,7 @@ jobs:
       - name: Upload APK to job
         uses: actions/upload-artifact@v3
         with:
-          name: ${{steps.build.outputs.ANDROID_APK_NAME}}
+          name: ${{steps.build-android.outputs.ANDROID_APK_NAME}}
           path: mobile/build/app/outputs/flutter-apk/${{steps.build.outputs.ANDROID_APK_NAME}}
 
   release:
