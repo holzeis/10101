@@ -222,7 +222,7 @@ wait-for-electrs-to-be-ready:
     done
 
 build-ipa:
-    cd mobile && flutter build ipa --dart-define="ELECTRS_ENDPOINT=${ELECTRS_ENDPOINT}" --dart-define="COORDINATOR_P2P_ENDPOINT=${COORDINATOR_P2P_ENDPOINT}"
+    cd mobile && flutter build ipa --export-options-plist=ios/exportOptions.plist --dart-define="ELECTRS_ENDPOINT=${ELECTRS_ENDPOINT}" --dart-define="COORDINATOR_P2P_ENDPOINT=${COORDINATOR_P2P_ENDPOINT}"
 
 publish-testflight:
     cd mobile && xcrun altool --upload-app --type ios --file ./build/ios/ipa/10101.ipa --apiKey ${ALTOOL_API_KEY} --apiIssuer ${ALTOOL_API_ISSUER}
