@@ -19,5 +19,18 @@
         <key>finance.get10101.app</key>
         <string>TestFlight Get10101 Provisioning</string>
     </dict>
+    <key>SchemeUserState</key>
+    <dict>
+        <key>native-cdylib.xcscheme_^#shared#^_</key>
+        <dict>
+            <key>orderHint</key>
+            <integer>7</integer>
+        </dict>
+        <key>native-staticlib.xcscheme_^#shared#^_</key>
+        <dict>
+            <key>orderHint</key>
+            <integer>6</integer>
+        </dict>
+    </dict>
 </dict>
 </plist>
