@@ -1,15 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-    <dict>
-        <key>method</key>
-        <string>app-store</string>
-        <key>teamID</key>
-        <string>V3D64P9D6W</string>
-        <key>provisioningProfiles</key>
-        <dict>
-            <key>finance.get10101.app</key>
-            <string>TestFlight Get10101 Provisioning</string>
-        </dict>
-    </dict>
+<dict>
+	<key>generateAppStoreInformation</key>
+	<false/>
+	<key>manageAppVersionAndBuildNumber</key>
+	<true/>
+	<key>method</key>
+	<string>app-store</string>
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<key>stripSwiftSymbols</key>
+	<true/>
+	<key>teamID</key>
+	<string>V3D64P9D6W</string>
+	<key>uploadSymbols</key>
+	<true/>
+</dict>
 </plist>
