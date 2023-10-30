@@ -18,8 +18,11 @@ pub struct Config {
     pub health_check_interval_secs: u64,
 }
 
-impl From<Config> for ConfigInternal {
-    fn from(config: Config) -> Self {
+impl From<(Config, String)> for ConfigInternal {
+    fn from(value: (Config, String)) -> Self {
+        let config = value.0;
+        let data_dir = value.1;
+
         tracing::debug!(?config, "Parsing config from flutter");
         Self {
             coordinator_pubkey: config.coordinator_pubkey.parse().expect("PK to be valid"),
@@ -37,6 +40,7 @@ impl From<Config> for ConfigInternal {
             health_check_interval: std::time::Duration::from_secs(
                 config.health_check_interval_secs,
             ),
+            data_dir,
         }
     }
 }

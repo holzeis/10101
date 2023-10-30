@@ -10,6 +10,7 @@ use crate::admin::list_peers;
 use crate::admin::open_channel;
 use crate::admin::send_payment;
 use crate::admin::sign_message;
+use crate::backup::SledBackup;
 use crate::collaborative_revert;
 use crate::db;
 use crate::db::liquidity::LiquidityRequestLog;
@@ -28,6 +29,7 @@ use crate::position::models::parse_channel_id;
 use crate::settings::Settings;
 use crate::AppError;
 use autometrics::autometrics;
+use axum::extract::BodyStream;
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::State;
@@ -45,6 +47,7 @@ use coordinator_commons::CollaborativeRevertData;
 use coordinator_commons::LspConfig;
 use coordinator_commons::OnboardingParam;
 use coordinator_commons::RegisterParams;
+use coordinator_commons::Restore;
 use coordinator_commons::TradeParams;
 use diesel::r2d2::ConnectionManager;
 use diesel::r2d2::Pool;
@@ -85,6 +88,7 @@ pub struct AppState {
     pub announcement_addresses: Vec<NetAddress>,
     pub node_alias: String,
     pub auth_users_notifier: mpsc::Sender<OrderbookMessage>,
+    pub user_backup: SledBackup,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -99,6 +103,7 @@ pub fn router(
     tx_price_feed: broadcast::Sender<Message>,
     tx_user_feed: broadcast::Sender<NewUserMessage>,
     auth_users_notifier: mpsc::Sender<OrderbookMessage>,
+    user_backup: SledBackup,
 ) -> Router {
     let app_state = Arc::new(AppState {
         node,
@@ -111,11 +116,17 @@ pub fn router(
         announcement_addresses,
         node_alias: node_alias.to_string(),
         auth_users_notifier,
+        user_backup,
     });
 
     Router::new()
         .route("/", get(index))
         .route("/api/version", get(version))
+        .route(
+            "/api/backup/:node_id/*key",
+            post(backup).delete(delete_backup),
+        )
+        .route("/api/restore/:node_id", get(restore))
         .route(
             "/api/prepare_onboarding_payment",
             post(prepare_onboarding_payment),
@@ -541,4 +552,38 @@ pub async fn collaborative_revert_confirm(
         AppError::InternalServerError("Could not confirm collaborative revert".to_string())
     })?;
     Ok(Json(serialize_hex(&raw_tx)))
+}
+
+pub async fn backup(
+    Path((node_id, key)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    stream: BodyStream,
+) -> Result<(), AppError> {
+    state
+        .user_backup
+        .backup(node_id, key, stream)
+        .await
+        .map_err(|e| AppError::InternalServerError(e.to_string()))
+}
+
+pub async fn delete_backup(
+    Path((node_id, key)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<(), AppError> {
+    tracing::debug!("Deleting user backup of {key} for {node_id}");
+    state
+        .user_backup
+        .delete(node_id, key)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))
+}
+
+async fn restore(
+    Path(node_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Restore>>, AppError> {
+    let backup = state.user_backup.restore(node_id.clone()).map_err(|e| {
+        AppError::InternalServerError(format!("Failed to restore backup for {node_id}. {e:#}"))
+    })?;
+
+    Ok(Json(backup))
 }

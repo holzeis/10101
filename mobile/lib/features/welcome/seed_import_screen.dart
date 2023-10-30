@@ -140,6 +140,7 @@ class SeedPhraseImporterState extends State<SeedPhraseImporter> {
                               try {
                                 final seedPath = await getSeedFilePath();
                                 logger.i("Restoring seed into $seedPath");
+
                                 await api
                                     .restoreFromSeedPhrase(
                                         seedPhrase: seedPhrase, targetSeedFilePath: seedPath)

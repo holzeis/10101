@@ -12,6 +12,7 @@ pub mod health;
 pub mod logger;
 pub mod schema;
 
+mod backup;
 mod orderbook;
 
 #[allow(
@@ -22,3 +23,4 @@ mod orderbook;
 )]
 mod bridge_generated;
 mod destination;
+mod storage;

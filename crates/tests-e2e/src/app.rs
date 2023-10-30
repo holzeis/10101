@@ -23,11 +23,14 @@ pub async fn run_app() -> AppHandle {
         };
 
         let app_dir = as_string(&app_dir);
+
+        tokio::task::spawn_blocking(move || {
+            native::api::pre_run(test_config(), app_dir).expect("Could not pre run app")
+        });
+
         let seed_dir = as_string(&seed_dir);
         tokio::task::spawn_blocking(move || {
             native::api::run(
-                test_config(),
-                app_dir,
                 seed_dir,
                 "".to_string(),
                 native::api::IncludeBacktraceOnPanic::No,

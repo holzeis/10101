@@ -23,6 +23,7 @@ class _LoadingScreenState extends State<LoadingScreen> {
   @override
   void initState() {
     super.initState();
+
     Future.wait<dynamic>([
       Preferences.instance.hasEmailAddress(),
       Preferences.instance.getOpenPosition(),

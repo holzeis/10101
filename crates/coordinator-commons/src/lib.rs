@@ -1,3 +1,4 @@
+use anyhow::bail;
 use bdk::bitcoin::secp256k1::ecdsa::Signature;
 use bdk::bitcoin::secp256k1::PublicKey;
 use bdk::bitcoin::Network;
@@ -170,6 +171,35 @@ pub fn is_eligible_for_rollover(timestamp: OffsetDateTime, network: Network) -> 
             (midnight - timestamp) < Duration::hours(8)
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum RestoreKind {
+    LN,
+    DLC,
+    TenTenOne,
+}
+
+impl TryFrom<&str> for RestoreKind {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let kind = match value {
+            "ln" => RestoreKind::LN,
+            "dlc" => RestoreKind::DLC,
+            "10101" => RestoreKind::TenTenOne,
+            _ => bail!("Unkown restore kind"),
+        };
+
+        Ok(kind)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Restore {
+    pub kind: RestoreKind,
+    pub key: String,
+    pub value: Vec<u8>,
 }
 
 #[cfg(test)]

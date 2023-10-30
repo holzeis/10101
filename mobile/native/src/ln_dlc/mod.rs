@@ -4,6 +4,7 @@ use crate::api::SendPayment;
 use crate::api::Status;
 use crate::api::WalletHistoryItem;
 use crate::api::WalletHistoryItemType;
+use crate::backup::DBBackupSubscriber;
 use crate::calculations;
 use crate::commons::reqwest_client;
 use crate::config;
@@ -34,7 +35,9 @@ use bdk::bitcoin::XOnlyPublicKey;
 use bdk::BlockTime;
 use bdk::FeeRate;
 use bitcoin::hashes::hex::ToHex;
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::secp256k1::Secp256k1;
+use bitcoin::secp256k1::SECP256K1;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -51,6 +54,7 @@ use itertools::chain;
 use itertools::Itertools;
 use lightning::events::Event;
 use lightning::ln::channelmanager::ChannelDetails;
+use lightning::sign::KeysManager;
 use ln_dlc_node::channel::Channel;
 use ln_dlc_node::channel::UserChannelId;
 use ln_dlc_node::config::app_config;
@@ -64,7 +68,6 @@ use ln_dlc_node::node::rust_dlc_manager::subchannel::SubChannelState;
 use ln_dlc_node::node::rust_dlc_manager::ChannelId;
 use ln_dlc_node::node::rust_dlc_manager::Storage as DlcStorage;
 use ln_dlc_node::node::LnDlcNodeSettings;
-use ln_dlc_node::node::NodeInfo;
 use ln_dlc_node::node::Storage as LnDlcNodeStorage;
 use ln_dlc_node::scorer;
 use ln_dlc_node::seed::Bip39Seed;
@@ -88,6 +91,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
 use time::OffsetDateTime;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
@@ -101,6 +105,7 @@ mod sync_position_to_dlc;
 
 pub mod channel_status;
 
+use crate::storage::TenTenOneNodeStorage;
 pub use channel_status::ChannelStatus;
 
 const PROCESS_INCOMING_DLC_MESSAGES_INTERVAL: Duration = Duration::from_millis(200);
@@ -119,6 +124,7 @@ pub const FUNDING_TX_WEIGHT_ESTIMATE: u64 = 220;
 
 static NODE: Storage<Arc<Node>> = Storage::new();
 static SEED: Storage<Bip39Seed> = Storage::new();
+static STORAGE: Storage<TenTenOneNodeStorage> = Storage::new();
 
 /// Trigger an on-chain sync followed by an update to the wallet balance and history.
 ///
@@ -157,15 +163,20 @@ pub fn get_seed_phrase() -> Vec<String> {
 }
 
 pub fn get_node_key() -> SecretKey {
-    NODE.get().inner.node_key()
+    let seed = SEED.get();
+    let time_since_unix_epoch = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("unix epos to not be earlier than now");
+    let keys_manger = KeysManager::new(
+        &seed.lightning_seed(),
+        time_since_unix_epoch.as_secs(),
+        time_since_unix_epoch.subsec_nanos(),
+    );
+    keys_manger.get_node_secret_key()
 }
 
-pub fn get_node_info() -> Result<NodeInfo> {
-    Ok(NODE
-        .try_get()
-        .context("NODE is not initialised yet, can't retrieve node info")?
-        .inner
-        .info)
+pub fn get_node_pubkey() -> PublicKey {
+    get_node_key().public_key(SECP256K1)
 }
 
 pub async fn update_node_settings(settings: LnDlcNodeSettings) {
@@ -216,7 +227,7 @@ pub fn get_or_create_tokio_runtime() -> Result<&'static Runtime> {
 /// Allows specifying a data directory and a seed directory to decouple
 /// data and seed storage (e.g. data is useful for debugging, seed location
 /// should be more protected).
-pub fn run(data_dir: String, seed_dir: String, runtime: &Runtime) -> Result<()> {
+pub fn run(seed_dir: String, runtime: &Runtime) -> Result<()> {
     let network = config::get_network();
 
     runtime.block_on(async move {
@@ -224,12 +235,6 @@ pub fn run(data_dir: String, seed_dir: String, runtime: &Runtime) -> Result<()> 
 
         let mut ephemeral_randomness = [0; 32];
         thread_rng().fill_bytes(&mut ephemeral_randomness);
-
-        let data_dir = Path::new(&data_dir).join(network.to_string());
-        if !data_dir.exists() {
-            std::fs::create_dir_all(&data_dir)
-                .context(format!("Could not create data dir for {network}"))?;
-        }
 
         // TODO: Consider using the same seed dir for all networks, and instead
         // change the filename, e.g. having `mainnet-seed` or `regtest-seed`
@@ -253,13 +258,33 @@ pub fn run(data_dir: String, seed_dir: String, runtime: &Runtime) -> Result<()> 
 
         let (event_sender, event_receiver) = watch::channel::<Option<Event>>(None);
 
+        let storage = match STORAGE.try_get() {
+            Some(storage) => storage.clone(),
+            None => {
+                // storage is only initialized before the node is started if a new wallet is created
+                // or restored.
+                let storage = TenTenOneNodeStorage::new(
+                    config::get_data_dir(),
+                    config::get_network(),
+                    get_node_key(),
+                );
+                tracing::info!("Initialized 10101 storage!");
+                STORAGE.set(storage.clone());
+                storage
+            }
+        };
+        let node_storage = Arc::new(NodeStorage);
+
+        event::subscribe(DBBackupSubscriber::new(storage.clone().client));
+
         let node = ln_dlc_node::node::Node::new(
             app_config(),
             scorer::in_memory_scorer,
             "10101",
             network,
-            data_dir.as_path(),
-            Arc::new(NodeStorage),
+            Path::new(&storage.data_dir),
+            storage.clone(),
+            node_storage,
             address,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), address.port()),
             util::into_net_addresses(address),
@@ -373,13 +398,45 @@ pub fn run(data_dir: String, seed_dir: String, runtime: &Runtime) -> Result<()> 
 }
 
 pub fn init_new_mnemonic(target_seed_file: &Path) -> Result<()> {
-    Bip39Seed::initialize(target_seed_file)?;
+    let seed = Bip39Seed::initialize(target_seed_file)?;
+    SEED.set(seed.clone());
+    let time_since_unix_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+    let keys_manger = KeysManager::new(
+        &seed.lightning_seed(),
+        time_since_unix_epoch.as_secs(),
+        time_since_unix_epoch.subsec_nanos(),
+    );
+
+    let storage = TenTenOneNodeStorage::new(
+        config::get_data_dir(),
+        config::get_network(),
+        keys_manger.get_node_secret_key(),
+    );
+    tracing::info!("Initialized 10101 storage!");
+    STORAGE.set(storage);
     Ok(())
 }
 
-pub fn restore_from_mnemonic(seed_words: &str, target_seed_file: &Path) -> Result<()> {
-    Bip39Seed::restore_from_mnemonic(seed_words, target_seed_file)?;
-    Ok(())
+#[tokio::main(flavor = "current_thread")]
+pub async fn restore_from_mnemonic(seed_words: &str, target_seed_file: &Path) -> Result<()> {
+    let seed = Bip39Seed::restore_from_mnemonic(seed_words, target_seed_file)?;
+    SEED.set(seed.clone());
+
+    let time_since_unix_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+    let keys_manger = KeysManager::new(
+        &seed.lightning_seed(),
+        time_since_unix_epoch.as_secs(),
+        time_since_unix_epoch.subsec_nanos(),
+    );
+
+    let storage = TenTenOneNodeStorage::new(
+        config::get_data_dir(),
+        config::get_network(),
+        keys_manger.get_node_secret_key(),
+    );
+    STORAGE.set(storage.clone());
+
+    storage.client.restore(storage.dlc_storage).await
 }
 
 fn keep_wallet_balance_and_history_up_to_date(node: &Node) -> Result<()> {
@@ -1011,7 +1068,7 @@ pub fn create_onboarding_invoice(
                     fee_sats,
                 );
                 node.inner
-                    .storage
+                    .node_storage
                     .upsert_channel(channel)
                     .with_context(|| {
                         format!(

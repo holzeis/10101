@@ -220,21 +220,10 @@ pub fn subscribe(stream: StreamSink<event::api::Event>) {
 }
 
 /// Wrapper for Flutter purposes - can throw an exception.
-pub fn run_in_flutter(
-    config: Config,
-    app_dir: String,
-    seed_dir: String,
-    fcm_token: String,
-) -> Result<()> {
+pub fn run_in_flutter(seed_dir: String, fcm_token: String) -> Result<()> {
     let result = if !IS_INITIALISED.try_get().unwrap_or(&false) {
-        run(
-            config,
-            app_dir,
-            seed_dir,
-            fcm_token,
-            IncludeBacktraceOnPanic::Yes,
-        )
-        .context("Failed to start the backend")
+        run(seed_dir, fcm_token, IncludeBacktraceOnPanic::Yes)
+            .context("Failed to start the backend")
     } else {
         Ok(())
     };
@@ -248,9 +237,12 @@ pub enum IncludeBacktraceOnPanic {
     No,
 }
 
+pub fn pre_run(config: Config, app_dir: String) -> Result<()> {
+    config::set(config, app_dir);
+    Ok(())
+}
+
 pub fn run(
-    config: Config,
-    app_dir: String,
     seed_dir: String,
     fcm_token: String,
     backtrace_on_panic: IncludeBacktraceOnPanic,
@@ -269,12 +261,12 @@ pub fn run(
         );
     }
 
-    config::set(config.clone());
-    db::init_db(&app_dir, get_network())?;
-    let runtime = ln_dlc::get_or_create_tokio_runtime()?;
-    ln_dlc::run(app_dir, seed_dir, runtime)?;
+    db::init_db(&config::get_data_dir(), get_network())?;
 
-    let (_health, tx) = health::Health::new(config, runtime);
+    let runtime = ln_dlc::get_or_create_tokio_runtime()?;
+    ln_dlc::run(seed_dir, runtime)?;
+
+    let (_health, tx) = health::Health::new(runtime);
 
     orderbook::subscribe(ln_dlc::get_node_key(), runtime, tx.orderbook, fcm_token)
 }
@@ -416,7 +408,8 @@ pub fn get_seed_phrase() -> SyncReturn<Vec<String>> {
 pub fn restore_from_seed_phrase(seed_phrase: String, target_seed_file_path: String) -> Result<()> {
     let file_path = PathBuf::from(target_seed_file_path);
     tracing::info!("Restoring seed from phrase to {:?}", file_path);
-    ln_dlc::restore_from_mnemonic(&seed_phrase, file_path.as_path())
+    ln_dlc::restore_from_mnemonic(&seed_phrase, file_path.as_path())?;
+    Ok(())
 }
 
 pub fn init_new_mnemonic(target_seed_file_path: String) -> Result<()> {
@@ -453,8 +446,8 @@ pub fn decode_destination(destination: String) -> Result<Destination> {
     destination::decode_destination(destination)
 }
 
-pub fn get_node_id() -> Result<SyncReturn<String>> {
-    Ok(SyncReturn(ln_dlc::get_node_info()?.pubkey.to_string()))
+pub fn get_node_id() -> SyncReturn<String> {
+    SyncReturn(ln_dlc::get_node_pubkey().to_string())
 }
 
 pub fn get_channel_open_fee_estimate_sat() -> Result<u64> {
