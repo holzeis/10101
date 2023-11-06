@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_native_splash/flutter_native_splash.dart';
 import 'package:get_10101/backend.dart';
 import 'package:get_10101/features/stable/stable_screen.dart';
 import 'package:get_10101/features/trade/trade_screen.dart';
@@ -38,25 +39,27 @@ class _LoadingScreenState extends State<LoadingScreen> {
       if (isSeedFilePresent) {
         runBackend(context).then((value) {
           logger.i("Backend started");
-        });
+
+          if (!hasEmailAddress) {
+            GoRouter.of(context).go(WelcomeScreen.route);
+          } else {
+            switch (position) {
+              case StableScreen.label:
+                GoRouter.of(context).go(StableScreen.route);
+              case TradeScreen.label:
+                GoRouter.of(context).go(TradeScreen.route);
+              default:
+                GoRouter.of(context).go(WalletScreen.route);
+            }
+          }
+        }).catchError((error) {
+          logger.e("Failed to start backend. $error");
+        }).whenComplete(() => FlutterNativeSplash.remove());
       } else {
+        FlutterNativeSplash.remove();
         // No seed file: let the user choose whether they want to create a new
         // wallet or import their old one
         GoRouter.of(context).go(NewWalletScreen.route);
-        return;
-      }
-
-      if (!hasEmailAddress) {
-        GoRouter.of(context).go(WelcomeScreen.route);
-      } else {
-        switch (position) {
-          case StableScreen.label:
-            GoRouter.of(context).go(StableScreen.route);
-          case TradeScreen.label:
-            GoRouter.of(context).go(TradeScreen.route);
-          default:
-            GoRouter.of(context).go(WalletScreen.route);
-        }
       }
     });
   }
