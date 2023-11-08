@@ -7,6 +7,7 @@ import 'package:get_10101/features/welcome/new_wallet_screen.dart';
 import 'package:get_10101/ffi.dart';
 import 'package:get_10101/logger/logger.dart';
 import 'package:get_10101/util/file.dart';
+import 'package:get_10101/util/preferences.dart';
 import 'package:go_router/go_router.dart';
 
 class SeedPhraseImporter extends StatefulWidget {
@@ -137,24 +138,20 @@ class SeedPhraseImporterState extends State<SeedPhraseImporter> {
                           : () async {
                               logger.i("Restoring a previous wallet from a given seed phrase");
                               final seedPhrase = twelveWords.join(" ");
-                              try {
-                                final seedPath = await getSeedFilePath();
+                              getSeedFilePath().then((seedPath) {
                                 logger.i("Restoring seed into $seedPath");
 
-                                await api
-                                    .restoreFromSeedPhrase(
-                                        seedPhrase: seedPhrase, targetSeedFilePath: seedPath)
-                                    .then((value) => GoRouter.of(context).go(LoadingScreen.route))
-                                    .catchError((error) {
-                                  showSnackBar(
-                                      ScaffoldMessenger.of(rootNavigatorKey.currentContext!),
-                                      "Failed to restore seed: $error");
-                                });
-                              } catch (e) {
+                                final restore = api.restoreFromSeedPhrase(
+                                    seedPhrase: seedPhrase, targetSeedFilePath: seedPath);
+
+                                // TODO(holzeis): Backup preferences and restore email from there.
+                                Preferences.instance.setEmailAddress("restored");
+                                GoRouter.of(context).go(LoadingScreen.route, extra: restore);
+                              }).catchError((e) {
                                 logger.e("Error restoring from seed phrase: $e");
                                 showSnackBar(ScaffoldMessenger.of(rootNavigatorKey.currentContext!),
                                     "Failed to restore seed: $e");
-                              }
+                              });
                             },
                       child: const Text(
                         "Import",
