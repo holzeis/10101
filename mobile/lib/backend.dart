@@ -13,7 +13,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:get_10101/logger/logger.dart';
 import 'package:provider/provider.dart';
 
-Future<void> preRun() async {
+Future<void> setConfig() async {
   bridge.Config config = Environment.parse();
 
   _setupRustLogging();
@@ -37,7 +37,11 @@ Future<void> preRun() async {
     appDir = seedDir;
   }
 
-  rust.api.preRun(config: config, appDir: appDir);
+  rust.api.setConfig(config: config, appDir: appDir, seedDir: seedDir);
+}
+
+Future<void> fullBackup() async {
+  rust.api.fullBackup();
 }
 
 /// Run the backend and retry a number of times if it fails for whatever reason

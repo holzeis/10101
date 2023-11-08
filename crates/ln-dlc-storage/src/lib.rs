@@ -1,7 +1,6 @@
 pub mod sled;
 
 use anyhow::Result;
-use bitcoin::hashes::hex::ToHex;
 use bitcoin::Address;
 use bitcoin::Txid;
 use dlc_manager::chain_monitor::ChainMonitor;
@@ -41,14 +40,14 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::string::ToString;
 
-const CONTRACT: &str = "contract";
-const CHANNEL: &str = "channel";
-const CHAIN_MONITOR: &str = "chainmonitor";
-const UTXO: &str = "utxo";
-const KEY_PAIR: &str = "keypair";
-const SUB_CHANNEL: &str = "subchannel";
-const ADDRESS: &str = "address";
-const ACTION: &str = "action";
+const CONTRACT: u8 = 1;
+const CHANNEL: u8 = 2;
+const CHAIN_MONITOR: u8 = 3;
+const UTXO: u8 = 5;
+const KEY_PAIR: u8 = 6;
+const SUB_CHANNEL: u8 = 7;
+const ADDRESS: u8 = 8;
+const ACTION: u8 = 9;
 
 pub trait WalletStorage {
     fn upsert_address(&self, address: &Address, privkey: &SecretKey) -> Result<()>;
@@ -66,11 +65,11 @@ pub trait WalletStorage {
 
 pub trait DLCStoreProvider {
     /// Read the object from a kv store by the given key
-    fn read(&self, keys: Vec<String>) -> Result<Vec<(String, Vec<u8>)>>;
+    fn read(&self, kind: u8, key: Option<Vec<u8>>) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
 
-    fn write(&self, keys: Vec<String>, value: Vec<u8>) -> Result<()>;
+    fn write(&self, kind: u8, key: Vec<u8>, value: Vec<u8>) -> Result<()>;
 
-    fn delete(&self, keys: Vec<String>) -> Result<()>;
+    fn delete(&self, kind: u8, key: Option<Vec<u8>>) -> Result<()>;
 }
 
 /// Implementation of Storage interface using the sled DB backend.
@@ -210,17 +209,14 @@ impl<K: DLCStoreProvider> DlcStorageProvider<K> {
         match contract {
             a @ Contract::Accepted(_) | a @ Contract::Signed(_) => {
                 self.store
-                    .delete(vec![CONTRACT.to_string(), a.get_temporary_id().to_hex()])
+                    .delete(CONTRACT, Some(a.get_temporary_id().to_vec()))
                     .map_err(to_storage_error)?;
             }
             _ => {}
         };
 
         self.store
-            .write(
-                vec![CONTRACT.to_string(), contract.get_id().to_hex()],
-                serialized.clone(),
-            )
+            .write(CONTRACT, contract.get_id().to_vec(), serialized.clone())
             .map_err(to_storage_error)?;
 
         Ok(Some(serialized))
@@ -252,7 +248,7 @@ impl<K: DLCStoreProvider> DlcStorageProvider<K> {
     fn get_raw_contracts(&self) -> Result<Vec<Vec<u8>>, Error> {
         let contracts = self
             .store
-            .read(vec![CONTRACT.to_string()])
+            .read(CONTRACT, None)
             .map_err(to_storage_error)?
             .into_iter()
             .map(|x| x.1)
@@ -266,7 +262,7 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
     fn get_contract(&self, contract_id: &ContractId) -> Result<Option<Contract>, Error> {
         match self
             .store
-            .read(vec![CONTRACT.to_string(), contract_id.to_hex()])
+            .read(CONTRACT, Some(contract_id.to_vec()))
             .map_err(to_storage_error)?
             .first()
         {
@@ -276,10 +272,7 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
     }
 
     fn get_contracts(&self) -> Result<Vec<Contract>, Error> {
-        let contracts = self
-            .store
-            .read(vec![CONTRACT.to_string()])
-            .map_err(to_storage_error)?;
+        let contracts = self.store.read(CONTRACT, None).map_err(to_storage_error)?;
 
         let contracts = contracts
             .iter()
@@ -298,13 +291,13 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
     fn create_contract(&self, contract: &OfferedContract) -> Result<(), Error> {
         let serialized = serialize_contract(&Contract::Offered(contract.clone()))?;
         self.store
-            .write(vec![CONTRACT.to_string(), contract.id.to_hex()], serialized)
+            .write(CONTRACT, contract.id.to_vec(), serialized)
             .map_err(to_storage_error)
     }
 
     fn delete_contract(&self, contract_id: &ContractId) -> Result<(), Error> {
         self.store
-            .delete(vec![CONTRACT.to_string(), contract_id.to_hex()])
+            .delete(CONTRACT, Some(contract_id.to_vec()))
             .map_err(to_storage_error)
     }
 
@@ -314,17 +307,14 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
         match contract {
             a @ Contract::Accepted(_) | a @ Contract::Signed(_) => {
                 self.store
-                    .delete(vec![CONTRACT.to_string(), a.get_temporary_id().to_hex()])
+                    .delete(CONTRACT, Some(a.get_temporary_id().to_vec()))
                     .map_err(to_storage_error)?;
             }
             _ => {}
         };
 
         self.store
-            .write(
-                vec![CONTRACT.to_string(), contract.get_id().to_hex()],
-                serialized,
-            )
+            .write(CONTRACT, contract.get_id().to_vec(), serialized)
             .map_err(to_storage_error)
     }
 
@@ -362,17 +352,14 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
         match &channel {
             a @ Channel::Accepted(_) | a @ Channel::Signed(_) => {
                 self.store
-                    .delete(vec![CHANNEL.to_string(), a.get_temporary_id().to_hex()])
+                    .delete(CHANNEL, Some(a.get_temporary_id().to_vec()))
                     .map_err(to_storage_error)?;
             }
             _ => {}
         };
 
         self.store
-            .write(
-                vec![CHANNEL.to_string(), channel.get_id().to_hex()],
-                serialized,
-            )
+            .write(CHANNEL, channel.get_id().to_vec(), serialized)
             .map_err(to_storage_error)?;
 
         if let Some(contract) = contract.as_ref() {
@@ -386,14 +373,14 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
 
     fn delete_channel(&self, channel_id: &dlc_manager::ChannelId) -> Result<(), Error> {
         self.store
-            .delete(vec![CHANNEL.to_string(), channel_id.to_hex()])
+            .delete(CHANNEL, Some(channel_id.to_vec()))
             .map_err(to_storage_error)
     }
 
     fn get_channel(&self, channel_id: &dlc_manager::ChannelId) -> Result<Option<Channel>, Error> {
         match self
             .store
-            .read(vec![CHANNEL.to_string(), channel_id.to_hex()])
+            .read(CHANNEL, Some(channel_id.to_vec()))
             .map_err(to_storage_error)?
             .first()
         {
@@ -420,7 +407,7 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
 
         let channels = self
             .store
-            .read(vec![CHANNEL.to_string()])
+            .read(CHANNEL, None)
             .map_err(to_storage_error)?
             .into_iter()
             .map(|x| x.1)
@@ -434,7 +421,7 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
     fn get_offered_channels(&self) -> Result<Vec<OfferedChannel>, Error> {
         let channels = self
             .store
-            .read(vec![CHANNEL.to_string()])
+            .read(CHANNEL, None)
             .map_err(to_storage_error)?
             .into_iter()
             .map(|x| x.1)
@@ -445,14 +432,18 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
 
     fn persist_chain_monitor(&self, monitor: &ChainMonitor) -> Result<(), Error> {
         self.store
-            .write(vec![CHAIN_MONITOR.to_string()], monitor.serialize()?)
+            .write(
+                CHAIN_MONITOR,
+                "chain_monitor".to_string().into_bytes(),
+                monitor.serialize()?,
+            )
             .map_err(|e| Error::StorageError(format!("Error writing chain monitor: {e}")))
     }
 
     fn get_chain_monitor(&self) -> Result<Option<ChainMonitor>, Error> {
         let chain_monitors = self
             .store
-            .read(vec![CHAIN_MONITOR.to_string()])
+            .read(CHAIN_MONITOR, None)
             .map_err(|e| Error::StorageError(format!("Error reading chain monitor: {e}")))?;
 
         let serialized = chain_monitors.first();
@@ -470,10 +461,7 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
         let serialized = serialize_sub_channel(subchannel)?;
 
         self.store
-            .write(
-                vec![SUB_CHANNEL.to_string(), subchannel.channel_id.to_hex()],
-                serialized,
-            )
+            .write(SUB_CHANNEL, subchannel.channel_id.to_vec(), serialized)
             .map_err(to_storage_error)
     }
 
@@ -483,7 +471,7 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
     ) -> Result<Option<SubChannel>, Error> {
         match self
             .store
-            .read(vec![SUB_CHANNEL.to_string(), channel_id.to_hex()])
+            .read(SUB_CHANNEL, Some(channel_id.to_vec()))
             .map_err(to_storage_error)?
             .first()
         {
@@ -495,7 +483,7 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
     fn get_sub_channels(&self) -> Result<Vec<SubChannel>, Error> {
         Ok(self
             .store
-            .read(vec![SUB_CHANNEL.to_string()])
+            .read(SUB_CHANNEL, None)
             .map_err(to_storage_error)?
             .iter()
             .filter_map(|x| match deserialize_sub_channel(&x.1) {
@@ -511,7 +499,7 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
     fn get_offered_sub_channels(&self) -> Result<Vec<SubChannel>, Error> {
         let sub_channels = self
             .store
-            .read(vec![SUB_CHANNEL.to_string()])
+            .read(SUB_CHANNEL, None)
             .map_err(to_storage_error)?
             .into_iter()
             .map(|x| x.1)
@@ -531,17 +519,14 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
         }
 
         self.store
-            .write(vec![ACTION.to_string()], buf)
+            .write(ACTION, "action".to_string().into_bytes(), buf)
             .map_err(to_storage_error)
     }
 
     fn get_sub_channel_actions(
         &self,
     ) -> Result<Vec<dlc_manager::sub_channel_manager::Action>, Error> {
-        let actions = self
-            .store
-            .read(vec![ACTION.to_string()])
-            .map_err(to_storage_error)?;
+        let actions = self.store.read(ACTION, None).map_err(to_storage_error)?;
 
         let buf = match actions.first() {
             Some(buf) if !buf.1.is_empty() => buf,
@@ -567,34 +552,34 @@ impl<K: DLCStoreProvider> Storage for DlcStorageProvider<K> {
 impl<K: DLCStoreProvider> WalletStorage for DlcStorageProvider<K> {
     fn upsert_address(&self, address: &Address, privkey: &SecretKey) -> Result<()> {
         self.store.write(
-            vec![ADDRESS.to_string(), address.to_string()],
+            ADDRESS,
+            address.to_string().into_bytes(),
             privkey.secret_bytes().to_vec(),
         )
     }
 
     fn delete_address(&self, address: &Address) -> Result<()> {
         self.store
-            .delete(vec![ADDRESS.to_string(), address.to_string()])
+            .delete(ADDRESS, Some(address.to_string().into_bytes()))
     }
 
     fn get_addresses(&self) -> Result<Vec<Address>> {
-        let addresses = self
-            .store
-            .read(vec![ADDRESS.to_string()])?
-            .iter()
-            .map(|x| x.0.to_string())
-            .collect::<Vec<String>>();
-
-        addresses
-            .iter()
-            .map(|x| Ok(x.parse().expect("to have a valid address as key")))
+        self.store
+            .read(ADDRESS, None)?
+            .into_iter()
+            .map(|x| {
+                Ok(String::from_utf8(x.1)
+                    .map_err(|e| Error::InvalidState(format!("Could not read address key {e}")))?
+                    .parse()
+                    .expect("to have a valid address as key"))
+            })
             .collect()
     }
 
     fn get_priv_key_for_address(&self, address: &Address) -> Result<Option<SecretKey>> {
         let priv_keys = self
             .store
-            .read(vec![ADDRESS.to_string(), address.to_string()])?;
+            .read(ADDRESS, Some(address.to_string().into_bytes()))?;
         let raw_key = priv_keys
             .first()
             .map(|raw_key| SecretKey::from_slice(&raw_key.1).expect("a valid secret key"));
@@ -604,7 +589,8 @@ impl<K: DLCStoreProvider> WalletStorage for DlcStorageProvider<K> {
 
     fn upsert_key_pair(&self, public_key: &PublicKey, privkey: &SecretKey) -> Result<()> {
         self.store.write(
-            vec![KEY_PAIR.to_string(), public_key.to_hex()],
+            KEY_PAIR,
+            public_key.serialize().to_vec(),
             privkey.secret_bytes().to_vec(),
         )
     }
@@ -612,10 +598,10 @@ impl<K: DLCStoreProvider> WalletStorage for DlcStorageProvider<K> {
     fn get_priv_key_for_pubkey(&self, public_key: &PublicKey) -> Result<Option<SecretKey>> {
         let priv_key = self
             .store
-            .read(vec![KEY_PAIR.to_string()])?
+            .read(KEY_PAIR, None)?
             .iter()
             .filter_map(|x| {
-                if x.0 == public_key.to_hex() {
+                if x.0 == public_key.serialize().to_vec() {
                     Some(SecretKey::from_slice(&x.1).expect("a valid secret key"))
                 } else {
                     None
@@ -629,31 +615,27 @@ impl<K: DLCStoreProvider> WalletStorage for DlcStorageProvider<K> {
     }
 
     fn upsert_utxo(&self, utxo: &Utxo) -> Result<()> {
-        let key = get_utxo_key(&utxo.outpoint.txid, utxo.outpoint.vout).to_hex();
+        let key = get_utxo_key(&utxo.outpoint.txid, utxo.outpoint.vout);
 
         let mut buf = Vec::new();
         utxo.write(&mut buf)?;
-        self.store.write(vec![UTXO.to_string(), key], buf)
+        self.store.write(UTXO, key, buf)
     }
 
     fn has_utxo(&self, utxo: &Utxo) -> Result<bool> {
-        let key = get_utxo_key(&utxo.outpoint.txid, utxo.outpoint.vout).to_hex();
-        let result = self
-            .store
-            .read(vec![UTXO.to_string()])?
-            .iter()
-            .any(|x| x.0 == key);
+        let key = get_utxo_key(&utxo.outpoint.txid, utxo.outpoint.vout);
+        let result = self.store.read(UTXO, None)?.iter().any(|x| x.0 == key);
 
         Ok(result)
     }
 
     fn delete_utxo(&self, utxo: &Utxo) -> Result<()> {
-        let key = get_utxo_key(&utxo.outpoint.txid, utxo.outpoint.vout).to_hex();
-        self.store.delete(vec![UTXO.to_string(), key])
+        let key = get_utxo_key(&utxo.outpoint.txid, utxo.outpoint.vout);
+        self.store.delete(UTXO, Some(key))
     }
 
     fn get_utxos(&self) -> Result<Vec<Utxo>> {
-        let utxos = self.store.read(vec![UTXO.to_string()])?;
+        let utxos = self.store.read(UTXO, None)?;
 
         utxos
             .iter()
@@ -667,12 +649,8 @@ impl<K: DLCStoreProvider> WalletStorage for DlcStorageProvider<K> {
     }
 
     fn unreserve_utxo(&self, txid: &Txid, vout: u32) -> Result<()> {
-        let key = get_utxo_key(txid, vout).to_hex();
-        let mut utxo = match self
-            .store
-            .read(vec![UTXO.to_string(), key.to_string()])?
-            .first()
-        {
+        let key = get_utxo_key(txid, vout);
+        let mut utxo = match self.store.read(UTXO, Some(key.clone()))?.first() {
             Some(res) => Utxo::read(&mut Cursor::new(&res.1))
                 .map_err(|_| Error::InvalidState("Could not read UTXO".to_string()))?,
             None => return Err(Error::InvalidState(format!("No utxo for {txid} {vout}")))?,
@@ -682,7 +660,7 @@ impl<K: DLCStoreProvider> WalletStorage for DlcStorageProvider<K> {
         let mut buf = Vec::new();
         utxo.write(&mut buf)?;
 
-        self.store.write(vec![UTXO.to_string(), key], buf)
+        self.store.write(UTXO, key, buf)
     }
 }
 

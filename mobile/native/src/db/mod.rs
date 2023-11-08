@@ -82,6 +82,10 @@ impl r2d2::CustomizeConnection<SqliteConnection, r2d2::Error> for ConnectionOpti
 }
 
 pub fn init_db(db_dir: &str, network: bitcoin::Network) -> Result<()> {
+    if DB.try_get().is_some() {
+        return Ok(());
+    }
+
     let database_url = format!("sqlite://{db_dir}/trades-{network}.sqlite");
     let manager = ConnectionManager::<SqliteConnection>::new(database_url);
     let pool = r2d2::Pool::builder()
@@ -111,12 +115,6 @@ pub fn init_db(db_dir: &str, network: bitcoin::Network) -> Result<()> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     BACKUP_CONNECTION.set(Arc::new(Mutex::new(backup_conn)));
-
-    tracing::debug!("Running initial backup!");
-    match backup() {
-        Ok(_) => tracing::debug!("Successfully created initial backup of database!"),
-        Err(error) => tracing::error!("Failed to create backup of database! {error:#}"),
-    }
 
     Ok(())
 }

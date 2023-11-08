@@ -18,10 +18,11 @@ pub struct Config {
     pub health_check_interval_secs: u64,
 }
 
-impl From<(Config, String)> for ConfigInternal {
-    fn from(value: (Config, String)) -> Self {
+impl From<(Config, String, String)> for ConfigInternal {
+    fn from(value: (Config, String, String)) -> Self {
         let config = value.0;
         let data_dir = value.1;
+        let seed_dir = value.2;
 
         tracing::debug!(?config, "Parsing config from flutter");
         Self {
@@ -41,6 +42,7 @@ impl From<(Config, String)> for ConfigInternal {
                 config.health_check_interval_secs,
             ),
             data_dir,
+            seed_dir,
         }
     }
 }

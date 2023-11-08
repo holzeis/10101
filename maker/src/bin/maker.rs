@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
     let announcement_addresses = ln_dlc_node::util::into_net_addresses(address);
     let node_alias = "maker";
 
-    let storage = TenTenOneNodeStorage::new(data_dir.to_string_lossy().to_string(), network);
+    let storage = TenTenOneNodeStorage::new(data_dir.to_string_lossy().to_string());
     let node_storage = Arc::new(InMemoryStore::default());
 
     let node = Arc::new(ln_dlc_node::node::Node::new(

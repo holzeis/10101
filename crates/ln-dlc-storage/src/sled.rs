@@ -1,6 +1,5 @@
 use crate::DLCStoreProvider;
-use anyhow::bail;
-use anyhow::ensure;
+use anyhow::Context;
 use parking_lot::RwLock;
 use sled::Db;
 use std::collections::HashMap;
@@ -11,68 +10,79 @@ pub struct SledStorageProvider {
     db: Db,
 }
 
+pub type SledStorageExport = Vec<(u8, Vec<u8>, Vec<u8>)>;
+
 impl SledStorageProvider {
     pub fn new(path: &str) -> Self {
         SledStorageProvider {
             db: sled::open(path).expect("valid path"),
         }
     }
+
+    /// Migrates the old keys of the dlc-sled-storage-provider::SledStorageProvider to the
+    /// ln_dlc_crate::SledStorageProvider
+    pub fn migrate(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Exports all key value pairs from the sled storage
+    pub fn export(&self) -> anyhow::Result<SledStorageExport> {
+        let mut export = vec![];
+        for (collection_type, collection_name, collection_iter) in self.db.export() {
+            if collection_type != b"tree" {
+                continue;
+            }
+            for mut kv in collection_iter {
+                let value = kv.pop().expect("failed to get value from tree export");
+                let key = kv.pop().expect("failed to get key from tree export");
+                let kind = collection_name
+                    .first()
+                    .expect("failed to get kind from tree export");
+
+                export.push((*kind, key, value));
+            }
+        }
+        Ok(export)
+    }
 }
 
 impl DLCStoreProvider for SledStorageProvider {
-    fn read(&self, key: Vec<String>) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
-        ensure!(!key.is_empty(), "missing key");
-        if key.len() == 1 {
-            let path = key.first().expect("key is not long enough");
-            let result = self.db.open_tree(path)?;
-            let result = result
-                .into_iter()
-                .map(|x| {
-                    (
-                        String::from_utf8(x.clone().expect("to not fail").0.to_vec())
-                            .expect("to fit into utf8"),
-                        x.expect("to not fail").1.to_vec(),
-                    )
-                })
-                .collect::<Vec<(String, Vec<u8>)>>();
+    fn read(&self, kind: u8, key: Option<Vec<u8>>) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let tree = self.db.open_tree([kind])?;
 
-            Ok(result)
-        } else {
-            let (key, path) = key.split_last().expect("key is not long enough");
-            let result = self.db.open_tree(path.join("/"))?;
-
-            let result = match result.get(key)? {
-                Some(value) => vec![(key.clone(), value.to_vec())],
+        if let Some(key) = key {
+            let result = match tree.get(key.clone())? {
+                Some(value) => vec![(key, value.to_vec())],
                 None => vec![],
             };
 
             Ok(result)
+        } else {
+            let result = tree
+                .iter()
+                .map(|entry| {
+                    let entry = entry.expect("to not fail");
+                    (entry.0.to_vec(), entry.1.to_vec())
+                })
+                .collect();
+
+            Ok(result)
         }
     }
 
-    fn write(&self, key: Vec<String>, value: Vec<u8>) -> anyhow::Result<()> {
-        ensure!(!key.is_empty(), "missing key");
-        if key.len() == 1 {
-            let path = key.first().expect("key is not long enough");
-            self.db.open_tree(path)?.insert("", value)?;
-        } else {
-            let (key, path) = key.split_last().expect("key is not long enough");
-            self.db.open_tree(path.join("/"))?.insert(key, value)?;
-        }
-
+    fn write(&self, kind: u8, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
+        self.db.open_tree([kind])?.insert(key, value)?;
         self.db.flush()?;
         Ok(())
     }
 
-    fn delete(&self, key: Vec<String>) -> anyhow::Result<()> {
-        ensure!(!key.is_empty(), "missing key");
+    fn delete(&self, kind: u8, key: Option<Vec<u8>>) -> anyhow::Result<()> {
+        let tree = self.db.open_tree([kind])?;
 
-        if key.len() == 1 {
-            let path = key.first().expect("key is not long enough");
-            self.db.open_tree(path)?.clear()?;
+        if let Some(key) = key {
+            tree.remove(key)?;
         } else {
-            let (key, path) = key.split_last().expect("key is not long enough");
-            self.db.open_tree(path.join("/"))?.remove(key)?;
+            tree.clear()?;
         }
 
         self.db.flush()?;
@@ -80,7 +90,7 @@ impl DLCStoreProvider for SledStorageProvider {
     }
 }
 
-type InMemoryStore = Arc<RwLock<HashMap<String, HashMap<String, Vec<u8>>>>>;
+type InMemoryStore = Arc<RwLock<HashMap<u8, HashMap<Vec<u8>, Vec<u8>>>>>;
 
 #[derive(Clone)]
 pub struct InMemoryDLCStoreProvider {
@@ -99,52 +109,31 @@ impl InMemoryDLCStoreProvider {
             memory: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-
-    fn get_path_and_key(&self, keys: Vec<String>) -> anyhow::Result<(String, String)> {
-        match keys.len() {
-            0 => bail!("missing key"),
-            1 => Ok((
-                keys.first().expect("key is not long enough").to_string(),
-                "".to_string(),
-            )),
-            _ => {
-                let (key, path) = keys.split_last().expect("key is not long enough");
-                Ok((path.join("/"), key.to_string()))
-            }
-        }
-    }
 }
 
 impl DLCStoreProvider for InMemoryDLCStoreProvider {
-    fn read(&self, keys: Vec<String>) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
-        let (path, key) = self.get_path_and_key(keys)?;
+    fn read(&self, kind: u8, key: Option<Vec<u8>>) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let store = self.memory.read();
+        let store = match store.get(&kind) {
+            Some(store) => store,
+            None => return Ok(vec![]),
+        };
 
-        if key.is_empty() {
-            match self.memory.read().get(&path) {
-                Some(store) => Ok(store.clone().into_iter().collect()),
-                None => Ok(vec![]),
-            }
-        } else {
-            let store = self.memory.read();
-            let store = match store.get(&path) {
-                Some(store) => store,
-                None => return Ok(vec![]),
+        if let Some(key) = key {
+            let result = match store.get(&key) {
+                Some(value) => vec![(key, value.clone())],
+                None => vec![],
             };
-
-            if let Some(value) = store.get(&key) {
-                Ok(vec![(key.to_string(), value.clone())])
-            } else {
-                Ok(vec![])
-            }
+            Ok(result)
+        } else {
+            Ok(store.clone().into_iter().collect())
         }
     }
 
-    fn write(&self, keys: Vec<String>, value: Vec<u8>) -> anyhow::Result<()> {
-        let (path, key) = self.get_path_and_key(keys)?;
-
+    fn write(&self, kind: u8, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
         self.memory
             .write()
-            .entry(path)
+            .entry(kind)
             .and_modify(|v| {
                 v.insert(key.clone(), value.clone());
             })
@@ -153,16 +142,15 @@ impl DLCStoreProvider for InMemoryDLCStoreProvider {
         Ok(())
     }
 
-    fn delete(&self, keys: Vec<String>) -> anyhow::Result<()> {
-        let (path, key) = self.get_path_and_key(keys)?;
-        if key.is_empty() {
-            self.memory.write().remove(&path);
-        } else {
+    fn delete(&self, kind: u8, key: Option<Vec<u8>>) -> anyhow::Result<()> {
+        if let Some(key) = key {
             self.memory
                 .write()
-                .get_mut(&path)
-                .expect("path to exist")
+                .get_mut(&kind)
+                .context("couldn't find map")?
                 .remove(&key);
+        } else {
+            self.memory.write().remove(&kind);
         }
 
         Ok(())
@@ -189,210 +177,144 @@ mod tests {
         };
     }
 
-    sled_test!(write_without_keys, |storage: SledStorageProvider| {
-        let result = storage.write(vec![], "test".to_string().into_bytes());
-        assert!(result.is_err())
-    });
-
-    sled_test!(write_with_path_only, |storage: SledStorageProvider| {
-        let result = storage.write(vec!["path".to_string()], "test".to_string().into_bytes());
-        assert!(result.is_ok())
-    });
-
-    sled_test!(write_with_path_and_keys, |storage: SledStorageProvider| {
+    sled_test!(write_key_and_value, |storage: SledStorageProvider| {
         let result = storage.write(
-            vec!["path".to_string(), "key1".to_string(), "key2".to_string()],
+            1,
+            "key".to_string().into_bytes(),
             "test".to_string().into_bytes(),
         );
         assert!(result.is_ok())
     });
 
-    sled_test!(read_without_keys, |storage: SledStorageProvider| {
-        let result = storage.read(vec![]);
-        assert!(result.is_err())
+    sled_test!(read_without_key, |storage: SledStorageProvider| {
+        storage
+            .write(
+                1,
+                "key".to_string().into_bytes(),
+                "test".to_string().into_bytes(),
+            )
+            .unwrap();
+        storage
+            .write(
+                1,
+                "key2".to_string().into_bytes(),
+                "test2".to_string().into_bytes(),
+            )
+            .unwrap();
+        storage
+            .write(
+                2,
+                "key3".to_string().into_bytes(),
+                "test3".to_string().into_bytes(),
+            )
+            .unwrap();
+        let result = storage.read(1, None).unwrap();
+
+        assert_eq!(2, result.len());
     });
 
-    sled_test!(read_with_path_only, |storage: SledStorageProvider| {
-        storage
-            .write(vec!["path".to_string()], "value".to_string().into_bytes())
-            .expect("to write");
+    sled_test!(read_with_key, |storage: SledStorageProvider| {
         storage
             .write(
-                vec!["path".to_string(), "key1".to_string()],
-                "value1".to_string().into_bytes(),
+                1,
+                "key".to_string().into_bytes(),
+                "test".to_string().into_bytes(),
             )
-            .expect("to write");
+            .unwrap();
         storage
             .write(
-                vec!["path".to_string(), "key2".to_string()],
-                "value2".to_string().into_bytes(),
+                1,
+                "key2".to_string().into_bytes(),
+                "test2".to_string().into_bytes(),
             )
-            .expect("to write");
-
-        let result = storage.read(vec!["path".to_string()]).expect("to read");
-        assert_eq!(3, result.len())
-    });
-
-    sled_test!(read_with_path_and_keys, |storage: SledStorageProvider| {
-        storage
-            .write(vec!["path".to_string()], "value".to_string().into_bytes())
-            .expect("to write");
+            .unwrap();
         storage
             .write(
-                vec!["path".to_string(), "key1".to_string()],
-                "value1".to_string().into_bytes(),
+                2,
+                "key3".to_string().into_bytes(),
+                "test3".to_string().into_bytes(),
             )
-            .expect("to write");
-        storage
-            .write(
-                vec!["path".to_string(), "key2".to_string()],
-                "value2".to_string().into_bytes(),
-            )
-            .expect("to write");
-
+            .unwrap();
         let result = storage
-            .read(vec!["path".to_string(), "key1".to_string()])
-            .expect("to read");
-        assert_eq!(1, result.len())
+            .read(1, Some("key2".to_string().into_bytes()))
+            .unwrap();
+
+        assert_eq!(1, result.len());
     });
 
     sled_test!(
-        read_with_non_existing_path,
+        read_with_non_existing_key,
         |storage: SledStorageProvider| {
-            storage
-                .write(vec!["path".to_string()], "value".to_string().into_bytes())
-                .expect("to write");
-            storage
-                .write(
-                    vec!["path".to_string(), "key1".to_string()],
-                    "value1".to_string().into_bytes(),
-                )
-                .expect("to write");
-            storage
-                .write(
-                    vec!["path".to_string(), "key2".to_string()],
-                    "value2".to_string().into_bytes(),
-                )
-                .expect("to write");
-
             let result = storage
-                .read(vec!["non_existing".to_string()])
-                .expect("to read");
+                .read(1, Some("non_existing".to_string().into_bytes()))
+                .unwrap();
             assert_eq!(0, result.len())
         }
     );
 
-    sled_test!(
-        read_with_non_existing_path_and_keys,
-        |storage: SledStorageProvider| {
-            storage
-                .write(vec!["path".to_string()], "value".to_string().into_bytes())
-                .expect("to write");
-            storage
-                .write(
-                    vec!["path".to_string(), "key1".to_string()],
-                    "value1".to_string().into_bytes(),
-                )
-                .expect("to write");
-            storage
-                .write(
-                    vec!["path".to_string(), "key2".to_string()],
-                    "value2".to_string().into_bytes(),
-                )
-                .expect("to write");
-
-            let result = storage
-                .read(vec!["non_existing".to_string(), "key1".to_string()])
-                .expect("to read");
-            assert_eq!(0, result.len())
-        }
-    );
-
-    sled_test!(delete_without_keys, |storage: SledStorageProvider| {
-        let result = storage.delete(vec![]);
-        assert!(result.is_err())
-    });
-
-    sled_test!(delete_with_path_only, |storage: SledStorageProvider| {
-        storage
-            .write(vec!["path".to_string()], "value".to_string().into_bytes())
-            .expect("to write");
-
-        storage.delete(vec!["path".to_string()]).expect("to delete");
-
-        let result = storage.read(vec!["path".to_string()]).expect("to read");
-        assert_eq!(0, result.len())
-    });
-
-    sled_test!(delete_with_path_and_keys, |storage: SledStorageProvider| {
+    sled_test!(delete_without_key, |storage: SledStorageProvider| {
         storage
             .write(
-                vec!["path".to_string(), "key1".to_string()],
-                "value1".to_string().into_bytes(),
+                1,
+                "key".to_string().into_bytes(),
+                "test".to_string().into_bytes(),
             )
-            .expect("to write");
+            .unwrap();
         storage
             .write(
-                vec!["path".to_string(), "key2".to_string()],
-                "value2".to_string().into_bytes(),
+                1,
+                "key2".to_string().into_bytes(),
+                "test2".to_string().into_bytes(),
             )
-            .expect("to write");
-
+            .unwrap();
         storage
-            .delete(vec!["path".to_string(), "key1".to_string()])
-            .expect("to delete");
+            .write(
+                2,
+                "key3".to_string().into_bytes(),
+                "test3".to_string().into_bytes(),
+            )
+            .unwrap();
 
-        let result = storage.read(vec!["path".to_string()]).expect("to read");
-        assert_eq!(1, result.len())
+        let result = storage.read(1, None).unwrap();
+        assert_eq!(2, result.len());
+
+        let result = storage.delete(1, None);
+        assert!(result.is_ok());
+
+        let result = storage.read(1, None).unwrap();
+        assert_eq!(0, result.len());
     });
 
-    sled_test!(
-        delete_with_non_existing_path,
-        |storage: SledStorageProvider| {
-            storage
-                .write(
-                    vec!["path".to_string(), "key1".to_string()],
-                    "value1".to_string().into_bytes(),
-                )
-                .expect("to write");
-            storage
-                .write(
-                    vec!["path".to_string(), "key2".to_string()],
-                    "value2".to_string().into_bytes(),
-                )
-                .expect("to write");
+    sled_test!(delete_with_key, |storage: SledStorageProvider| {
+        storage
+            .write(
+                1,
+                "key".to_string().into_bytes(),
+                "test".to_string().into_bytes(),
+            )
+            .unwrap();
+        storage
+            .write(
+                1,
+                "key2".to_string().into_bytes(),
+                "test2".to_string().into_bytes(),
+            )
+            .unwrap();
+        storage
+            .write(
+                2,
+                "key3".to_string().into_bytes(),
+                "test3".to_string().into_bytes(),
+            )
+            .unwrap();
 
-            storage
-                .delete(vec!["non_existing".to_string()])
-                .expect("to delete");
+        let result = storage.read(1, None).unwrap();
+        assert_eq!(2, result.len());
 
-            let result = storage.read(vec!["path".to_string()]).expect("to read");
-            assert_eq!(2, result.len())
-        }
-    );
+        let result = storage.delete(1, Some("key2".to_string().into_bytes()));
+        assert!(result.is_ok());
 
-    sled_test!(
-        delete_with_non_existing_path_and_keys,
-        |storage: SledStorageProvider| {
-            storage
-                .write(
-                    vec!["path".to_string(), "key1".to_string()],
-                    "value1".to_string().into_bytes(),
-                )
-                .expect("to write");
-            storage
-                .write(
-                    vec!["path".to_string(), "key2".to_string()],
-                    "value2".to_string().into_bytes(),
-                )
-                .expect("to write");
-
-            storage
-                .delete(vec!["non_existing".to_string(), "key1".to_string()])
-                .expect("to delete");
-
-            let result = storage.read(vec!["path".to_string()]).expect("to read");
-            assert_eq!(2, result.len())
-        }
-    );
+        let result = storage.read(1, None).unwrap();
+        assert_eq!(1, result.len());
+    });
 }

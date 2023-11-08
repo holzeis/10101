@@ -162,8 +162,27 @@ pub fn get_seed_phrase() -> Vec<String> {
         .get_seed_phrase()
 }
 
+/// Gets the seed from the storage or from disk. However it will panic if the seed can not be found.
+/// No new seed will be created.
+fn get_seed() -> Bip39Seed {
+    match SEED.try_get() {
+        Some(seed) => seed.clone(),
+        None => {
+            let seed_dir = config::get_seed_dir();
+
+            let network = config::get_network();
+            let seed_path = Path::new(&seed_dir).join(network.to_string()).join("seed");
+            assert!(seed_path.exists());
+
+            let seed = Bip39Seed::initialize(&seed_path).expect("to read seed file");
+            SEED.set(seed.clone());
+            seed
+        }
+    }
+}
+
 pub fn get_node_key() -> SecretKey {
-    let seed = SEED.get();
+    let seed = get_seed();
     let time_since_unix_epoch = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("unix epos to not be earlier than now");
@@ -222,6 +241,25 @@ pub fn get_or_create_tokio_runtime() -> Result<&'static Runtime> {
     Ok(RUNTIME.get())
 }
 
+/// Gets the 10101 node storage, initializes the storage if not found yet.
+pub fn get_storage() -> TenTenOneNodeStorage {
+    match STORAGE.try_get() {
+        Some(storage) => storage.clone(),
+        None => {
+            // storage is only initialized before the node is started if a new wallet is created
+            // or restored.
+            let storage = TenTenOneNodeStorage::new(
+                config::get_data_dir(),
+                config::get_network(),
+                get_node_key(),
+            );
+            tracing::info!("Initialized 10101 storage!");
+            STORAGE.set(storage.clone());
+            storage
+        }
+    }
+}
+
 /// Start the node
 ///
 /// Allows specifying a data directory and a seed directory to decouple
@@ -236,14 +274,6 @@ pub fn run(seed_dir: String, runtime: &Runtime) -> Result<()> {
         let mut ephemeral_randomness = [0; 32];
         thread_rng().fill_bytes(&mut ephemeral_randomness);
 
-        // TODO: Consider using the same seed dir for all networks, and instead
-        // change the filename, e.g. having `mainnet-seed` or `regtest-seed`
-        let seed_dir = Path::new(&seed_dir).join(network.to_string());
-        if !seed_dir.exists() {
-            std::fs::create_dir_all(&seed_dir)
-                .context(format!("Could not create data dir for {network}"))?;
-        }
-
         event::subscribe(position::subscriber::Subscriber {});
         // TODO: Subscribe to events from the orderbook and publish OrderFilledWith event
 
@@ -252,28 +282,16 @@ pub fn run(seed_dir: String, runtime: &Runtime) -> Result<()> {
             listener.local_addr().expect("To get a free local address")
         };
 
+        let seed_dir = Path::new(&seed_dir).join(network.to_string());
         let seed_path = seed_dir.join("seed");
         let seed = Bip39Seed::initialize(&seed_path)?;
         SEED.set(seed.clone());
 
         let (event_sender, event_receiver) = watch::channel::<Option<Event>>(None);
 
-        let storage = match STORAGE.try_get() {
-            Some(storage) => storage.clone(),
-            None => {
-                // storage is only initialized before the node is started if a new wallet is created
-                // or restored.
-                let storage = TenTenOneNodeStorage::new(
-                    config::get_data_dir(),
-                    config::get_network(),
-                    get_node_key(),
-                );
-                tracing::info!("Initialized 10101 storage!");
-                STORAGE.set(storage.clone());
-                storage
-            }
-        };
         let node_storage = Arc::new(NodeStorage);
+
+        let storage = get_storage();
 
         event::subscribe(DBBackupSubscriber::new(storage.clone().client));
 
@@ -399,43 +417,16 @@ pub fn run(seed_dir: String, runtime: &Runtime) -> Result<()> {
 
 pub fn init_new_mnemonic(target_seed_file: &Path) -> Result<()> {
     let seed = Bip39Seed::initialize(target_seed_file)?;
-    SEED.set(seed.clone());
-    let time_since_unix_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
-    let keys_manger = KeysManager::new(
-        &seed.lightning_seed(),
-        time_since_unix_epoch.as_secs(),
-        time_since_unix_epoch.subsec_nanos(),
-    );
-
-    let storage = TenTenOneNodeStorage::new(
-        config::get_data_dir(),
-        config::get_network(),
-        keys_manger.get_node_secret_key(),
-    );
-    tracing::info!("Initialized 10101 storage!");
-    STORAGE.set(storage);
+    SEED.set(seed);
     Ok(())
 }
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn restore_from_mnemonic(seed_words: &str, target_seed_file: &Path) -> Result<()> {
     let seed = Bip39Seed::restore_from_mnemonic(seed_words, target_seed_file)?;
-    SEED.set(seed.clone());
+    SEED.set(seed);
 
-    let time_since_unix_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
-    let keys_manger = KeysManager::new(
-        &seed.lightning_seed(),
-        time_since_unix_epoch.as_secs(),
-        time_since_unix_epoch.subsec_nanos(),
-    );
-
-    let storage = TenTenOneNodeStorage::new(
-        config::get_data_dir(),
-        config::get_network(),
-        keys_manger.get_node_secret_key(),
-    );
-    STORAGE.set(storage.clone());
-
+    let storage = get_storage();
     storage.client.restore(storage.dlc_storage).await
 }
 

@@ -18,7 +18,7 @@ void main() async {
   FlutterNativeSplash.preserve(widgetsBinding: widgetsBinding);
 
   await initFirebase();
-  await preRun();
+  await setConfig();
 
   runApp(MultiProvider(providers: createProviders(), child: const TenTenOneApp()));
 }

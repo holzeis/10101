@@ -10,6 +10,7 @@ use crate::event;
 use crate::event::api::FlutterSubscriber;
 use crate::health;
 use crate::ln_dlc;
+use crate::ln_dlc::get_storage;
 use crate::ln_dlc::FUNDING_TX_WEIGHT_ESTIMATE;
 use crate::logger;
 use crate::orderbook;
@@ -237,9 +238,15 @@ pub enum IncludeBacktraceOnPanic {
     No,
 }
 
-pub fn pre_run(config: Config, app_dir: String) -> Result<()> {
-    config::set(config, app_dir);
+pub fn set_config(config: Config, app_dir: String, seed_dir: String) -> Result<()> {
+    config::set(config, app_dir, seed_dir);
     Ok(())
+}
+
+#[tokio::main(flavor = "current_thread")]
+pub async fn full_backup() -> Result<()> {
+    db::init_db(&config::get_data_dir(), get_network())?;
+    get_storage().full_backup().await
 }
 
 pub fn run(

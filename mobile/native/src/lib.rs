@@ -22,5 +22,6 @@ mod orderbook;
     unused_qualifications
 )]
 mod bridge_generated;
+mod cipher;
 mod destination;
 mod storage;

@@ -31,6 +31,7 @@ pub trait BackupClient {
     fn restore(&self) -> anyhow::Result<()>;
 }
 
+/// Represents an un-opinionated storage interfaces for reading lightning data.
 pub trait LDKStoreReader {
     fn read_network_graph(&self) -> Option<Vec<u8>>;
     fn read_manager(&self) -> Option<Vec<u8>>;
@@ -48,6 +49,9 @@ pub trait LDKStoreReader {
     where
         ES::Target: EntropySource + Sized,
         SP::Target: SignerProvider + Sized;
+
+    /// Exports all data for a backup
+    fn export(&self) -> anyhow::Result<Vec<(String, Vec<u8>)>>;
 }
 
 #[derive(Clone)]
@@ -154,19 +158,29 @@ impl LDKStoreReader for TenTenOneInMemoryStorage {
         }
         Ok(res)
     }
+
+    fn export(&self) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+        let export = self
+            .cache
+            .lock()
+            .clone()
+            .into_iter()
+            .collect::<Vec<(String, Vec<u8>)>>();
+        Ok(export)
+    }
 }
 
 impl DLCStoreProvider for TenTenOneInMemoryStorage {
-    fn read(&self, keys: Vec<String>) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
-        self.dlc_store.read(keys)
+    fn read(&self, kind: u8, key: Option<Vec<u8>>) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.dlc_store.read(kind, key)
     }
 
-    fn write(&self, keys: Vec<String>, value: Vec<u8>) -> anyhow::Result<()> {
-        self.dlc_store.write(keys, value)
+    fn write(&self, kind: u8, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
+        self.dlc_store.write(kind, key, value)
     }
 
-    fn delete(&self, keys: Vec<String>) -> anyhow::Result<()> {
-        self.dlc_store.delete(keys)
+    fn delete(&self, kind: u8, key: Option<Vec<u8>>) -> anyhow::Result<()> {
+        self.dlc_store.delete(kind, key)
     }
 }
 

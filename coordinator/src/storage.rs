@@ -1,5 +1,4 @@
 use bitcoin::BlockHash;
-use bitcoin::Network;
 use lightning::chain::channelmonitor::ChannelMonitor;
 use lightning::sign::EntropySource;
 use lightning::sign::SignerProvider;
@@ -21,15 +20,13 @@ pub struct TenTenOneNodeStorage {
     pub ln_storage: Arc<FilesystemPersister>,
     pub dlc_storage: Arc<SledStorageProvider>,
     pub data_dir: String,
-    pub network: Network,
 }
 
 impl TenTenOneStorage for TenTenOneNodeStorage {}
 
 impl TenTenOneNodeStorage {
-    pub fn new(data_dir: String, network: Network) -> TenTenOneNodeStorage {
-        let mut data_dir = PathBuf::from(data_dir);
-        data_dir.push(network.to_string());
+    pub fn new(data_dir: String) -> TenTenOneNodeStorage {
+        let data_dir = PathBuf::from(data_dir);
 
         if !data_dir.exists() {
             fs::create_dir_all(data_dir.as_path())
@@ -45,7 +42,6 @@ impl TenTenOneNodeStorage {
             ln_storage,
             dlc_storage,
             data_dir,
-            network,
         }
     }
 }
@@ -84,19 +80,23 @@ impl LDKStoreReader for TenTenOneNodeStorage {
         self.ln_storage
             .read_channelmonitors(entropy_source, signer_provider)
     }
+
+    fn export(&self) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+        unimplemented!("Exporting the coordinators lightning data is not supported")
+    }
 }
 
 impl DLCStoreProvider for TenTenOneNodeStorage {
-    fn read(&self, keys: Vec<String>) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
-        self.dlc_storage.read(keys)
+    fn read(&self, kind: u8, key: Option<Vec<u8>>) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.dlc_storage.read(kind, key)
     }
 
-    fn write(&self, keys: Vec<String>, value: Vec<u8>) -> anyhow::Result<()> {
-        self.dlc_storage.write(keys, value)
+    fn write(&self, kind: u8, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
+        self.dlc_storage.write(kind, key, value)
     }
 
-    fn delete(&self, keys: Vec<String>) -> anyhow::Result<()> {
-        self.dlc_storage.delete(keys)
+    fn delete(&self, kind: u8, key: Option<Vec<u8>>) -> anyhow::Result<()> {
+        self.dlc_storage.delete(kind, key)
     }
 }
 

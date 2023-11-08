@@ -24,10 +24,11 @@ pub struct ConfigInternal {
     oracle_pubkey: XOnlyPublicKey,
     health_check_interval: Duration,
     data_dir: String,
+    seed_dir: String,
 }
 
-pub fn set(config: Config, app_dir: String) {
-    CONFIG.set((config, app_dir).into());
+pub fn set(config: Config, app_dir: String, seed_dir: String) {
+    CONFIG.set((config, app_dir, seed_dir).into());
 }
 
 pub fn coordinator_health_endpoint() -> String {
@@ -70,6 +71,10 @@ pub fn get_network() -> bitcoin::Network {
 
 pub fn get_data_dir() -> String {
     CONFIG.get().data_dir.clone()
+}
+
+pub fn get_seed_dir() -> String {
+    CONFIG.get().seed_dir.clone()
 }
 
 pub fn get_backup_dir() -> String {

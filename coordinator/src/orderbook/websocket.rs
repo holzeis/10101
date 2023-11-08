@@ -128,7 +128,7 @@ pub async fn websocket_connection(stream: WebSocket, state: Arc<AppState>) {
                     fcm_token,
                     signature,
                 }) => {
-                    let msg = create_sign_message();
+                    let msg = create_sign_message(b"Hello it's me Mario".to_vec());
                     let trader_id = signature.pubkey;
                     let signature = signature.signature;
 

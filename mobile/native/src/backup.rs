@@ -1,26 +1,30 @@
+use crate::cipher::AesCipher;
 use crate::config;
 use crate::db;
 use crate::event::subscriber::Subscriber;
 use crate::event::EventInternal;
 use crate::event::EventType;
 use anyhow::bail;
+use anyhow::ensure;
+use anyhow::Result;
 use bitcoin::hashes::hex::ToHex;
-use bitcoin::secp256k1::PublicKey;
+use coordinator_commons::Backup;
+use coordinator_commons::DeleteBackup;
 use coordinator_commons::Restore;
 use coordinator_commons::RestoreKind;
+use futures::future::RemoteHandle;
+use futures::FutureExt;
 use ln_dlc_storage::sled::SledStorageProvider;
 use ln_dlc_storage::DLCStoreProvider;
-use reqwest::Body;
 use reqwest::Client;
 use reqwest::StatusCode;
 use std::fs;
-use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::spawn_blocking;
-use tokio_util::codec::BytesCodec;
-use tokio_util::codec::FramedRead;
+
+const BLACKLIST: [&str; 1] = ["ln/network_graph"];
 
 #[derive(Clone)]
 pub struct DBBackupSubscriber {
@@ -31,29 +35,24 @@ impl DBBackupSubscriber {
     pub fn new(client: RemoteBackupClient) -> Self {
         Self { client }
     }
+
+    pub fn backup(&self) -> Result<()> {
+        let db_backup = db::backup()?;
+        tracing::debug!("Successfully created backup of database! Uploading snapshot!");
+        let value = fs::read(db_backup)?;
+        spawn_blocking({
+            let client = self.client.clone();
+            move || client.backup("10101/db".to_string(), value).forget()
+        });
+
+        Ok(())
+    }
 }
 
 impl Subscriber for DBBackupSubscriber {
     fn notify(&self, _event: &EventInternal) {
-        let db_backup = match db::backup() {
-            Ok(db_backup) => {
-                tracing::debug!("Successfully created backup of database! Uploading snapshot!");
-                db_backup
-            }
-            Err(error) => {
-                tracing::error!("Failed to create backup of database. {error}");
-                return;
-            }
-        };
-
-        match fs::read(db_backup) {
-            Ok(value) => {
-                spawn_blocking({
-                    let client = self.client.clone();
-                    move || client.backup("10101/db".to_string(), value)
-                });
-            }
-            Err(e) => tracing::error!("Failed to create backup of database. {e:#}"),
+        if let Err(e) = self.backup() {
+            tracing::error!("Failed to backup db. {e:#}");
         }
     }
 
@@ -66,68 +65,104 @@ impl Subscriber for DBBackupSubscriber {
             EventType::PositionClosedNotification,
             EventType::OrderUpdateNotification,
             EventType::OrderFilledWith,
+            EventType::SpendableOutputs,
         ]
     }
 }
 
 #[derive(Clone)]
 pub struct RemoteBackupClient {
-    client: Client,
-    backup_endpoint: String,
-    restore_endpoint: String,
+    inner: Client,
+    endpoint: String,
+    cipher: AesCipher,
 }
 
 impl RemoteBackupClient {
-    pub fn new(node_id: PublicKey) -> RemoteBackupClient {
-        let client = Client::builder()
+    pub fn new(cipher: AesCipher) -> RemoteBackupClient {
+        let inner = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .expect("Could not build reqwest client");
 
-        let backup_endpoint = format!(
-            "http://{}/api/backup/{}",
-            config::get_http_endpoint(),
-            node_id
-        );
-
-        let restore_endpoint = format!(
-            "http://{}/api/restore/{}",
-            config::get_http_endpoint(),
-            node_id
-        );
-
         Self {
-            client,
-            backup_endpoint,
-            restore_endpoint,
+            inner,
+            endpoint: format!("http://{}/api", config::get_http_endpoint()),
+            cipher,
         }
     }
 }
 
 impl RemoteBackupClient {
-    pub fn delete(&self, key: String) {
-        tokio::spawn({
-            let client = self.client.clone();
-            let endpoint = format!("{}/{key}", self.backup_endpoint.clone());
+    pub fn delete(&self, key: String) -> RemoteHandle<()> {
+        let (fut, remote_handle) = {
+            let client = self.inner.clone();
+            let node_id = self.cipher.public_key();
+            let endpoint = format!("{}/backup/{}", self.endpoint.clone(), node_id);
+            let cipher = self.cipher.clone();
+            let message = node_id.to_string().as_bytes().to_vec();
             async move {
-                if let Err(e) = client.delete(endpoint).send().await {
+                let signature = match cipher.sign(message) {
+                    Ok(signature) => signature,
+                    Err(e) => {
+                        tracing::error!(%key, "{e:#}");
+                        return;
+                    }
+                };
+
+                let backup = DeleteBackup {
+                    key: key.clone(),
+                    signature,
+                };
+
+                if let Err(e) = client.delete(endpoint).json(&backup).send().await {
                     tracing::error!("Failed to delete backup of {key}. {e:#}")
                 } else {
                     tracing::debug!("Successfully deleted backup of {key}");
                 }
             }
-        });
+        }
+        .remote_handle();
+
+        tokio::spawn(fut);
+
+        remote_handle
     }
 
-    pub fn backup(&self, key: String, value: Vec<u8>) {
-        tokio::spawn({
-            let client = self.client.clone();
-            let endpoint = format!("{}/{key}", self.backup_endpoint.clone());
+    pub fn backup(&self, key: String, value: Vec<u8>) -> RemoteHandle<()> {
+        tracing::trace!("Creating backup for {key} with value {}", value.to_hex());
+        let (fut, remote_handle) = {
+            let client = self.inner.clone();
+            let cipher = self.cipher.clone();
+            let node_id = cipher.public_key();
+            let endpoint = format!("{}/backup/{}", self.endpoint.clone(), node_id);
             async move {
-                let cursor = Cursor::new(value);
-                let framed_read = FramedRead::new(cursor, BytesCodec::new());
-                let body = Body::wrap_stream(framed_read);
-                match client.post(endpoint).body(body).send().await {
+                if BLACKLIST.contains(&key.as_str()) {
+                    tracing::debug!(key, "Skipping blacklisted backup");
+                    return;
+                }
+
+                let encrypted_value = match cipher.encrypt(value) {
+                    Ok(encrypted_value) => encrypted_value,
+                    Err(e) => {
+                        tracing::error!(%key, "{e:#}");
+                        return;
+                    }
+                };
+                let signature = match cipher.sign(encrypted_value.clone()) {
+                    Ok(signature) => signature,
+                    Err(e) => {
+                        tracing::error!(%key, "{e:#}");
+                        return;
+                    }
+                };
+
+                let backup = Backup {
+                    key: key.clone(),
+                    value: encrypted_value,
+                    signature,
+                };
+
+                match client.post(endpoint).json(&backup).send().await {
                     Ok(response) => {
                         tracing::debug!("Response status code {}", response.status());
                         if response.status() != StatusCode::OK {
@@ -138,26 +173,33 @@ impl RemoteBackupClient {
                                 Err(e) => tracing::error!("Failed to upload backup. {e}"),
                             }
                         } else {
-                            let resp = response.text().await.expect("response");
-                            tracing::debug!(
-                                "Successfully uploaded backup of {key}. Response: {resp}"
-                            );
+                            tracing::debug!("Successfully uploaded backup of {key}.");
                         }
                     }
                     Err(e) => tracing::error!("Failed to create a backup of {key}. {e:#}"),
                 }
             }
-        });
+        }
+        .remote_handle();
+
+        tokio::spawn(fut);
+
+        remote_handle
     }
 
-    pub async fn restore(&self, dlc_storage: Arc<SledStorageProvider>) -> anyhow::Result<()> {
+    pub async fn restore(&self, dlc_storage: Arc<SledStorageProvider>) -> Result<()> {
         tokio::spawn({
-            let client = self.client.clone();
-            let endpoint = self.restore_endpoint.clone();
+            let client = self.inner.clone();
+            let cipher = self.cipher.clone();
+            let node_id = cipher.public_key();
+            let endpoint = format!("{}/restore/{}", self.endpoint.clone(), node_id);
             let data_dir = config::get_data_dir();
             let network = config::get_network();
+            let message = node_id.to_string().as_bytes().to_vec();
             async move {
-                match client.get(endpoint).send().await {
+                let signature = cipher.sign(message)?;
+
+                match client.get(endpoint).json(&signature).send().await {
                     Ok(response) => {
                         tracing::debug!("Response status code {}", response.status());
                         if response.status() != StatusCode::OK {
@@ -169,29 +211,37 @@ impl RemoteBackupClient {
                         tracing::debug!("Successfully downloaded backup.");
 
                         for restore in backup.into_iter() {
+                            let decrypted_value = cipher.decrypt(restore.value)?;
                             match restore.kind {
                                 RestoreKind::LN => {
                                     tracing::debug!(
                                         "Restoring {} with value {}",
                                         restore.key,
-                                        restore.value.to_hex()
+                                        decrypted_value.to_hex()
                                     );
                                     let dest_file = Path::new(&data_dir)
                                         .join(network.to_string())
                                         .join(restore.key.clone());
 
                                     fs::create_dir_all(dest_file.parent().expect("parent"))?;
-                                    fs::write(dest_file.as_path(), &restore.value)?;
+                                    fs::write(dest_file.as_path(), decrypted_value)?;
                                 }
                                 RestoreKind::DLC => {
                                     tracing::debug!(
                                         "Restoring {} with value {}",
                                         restore.key,
-                                        restore.value.to_hex()
+                                        decrypted_value.to_hex()
                                     );
-                                    let keys =
-                                        restore.key.split('/').map(|k| k.to_string()).collect();
-                                    dlc_storage.write(keys, restore.value)?;
+                                    let keys = restore.key.split('/').collect::<Vec<&str>>();
+                                    ensure!(keys.len() == 2, "dlc key is too short");
+
+                                    let kind = *hex::decode(keys.first().expect("to exist"))?
+                                        .first()
+                                        .expect("to exist");
+
+                                    let key = hex::decode(keys.get(1).expect("to exist"))?;
+
+                                    dlc_storage.write(kind, key, decrypted_value)?;
                                 }
                                 RestoreKind::TenTenOne => {
                                     let data_dir = Path::new(&data_dir);
@@ -201,7 +251,7 @@ impl RemoteBackupClient {
                                         "Restoring 10101 database backup into {}",
                                         db_file.to_string_lossy().to_string()
                                     );
-                                    fs::write(db_file.as_path(), restore.value)?;
+                                    fs::write(db_file.as_path(), decrypted_value)?;
                                 }
                             }
                         }
@@ -209,7 +259,7 @@ impl RemoteBackupClient {
                     }
                     Err(e) => bail!("Failed to download backup. {e:#}"),
                 }
-                anyhow::Ok(())
+                Ok(())
             }
         })
         .await?

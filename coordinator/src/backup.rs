@@ -1,15 +1,17 @@
 use anyhow::Result;
-use axum::body::Bytes;
+use bitcoin::secp256k1::ecdsa::Signature;
+use bitcoin::secp256k1::PublicKey;
+use coordinator_commons::Backup;
+use coordinator_commons::DeleteBackup;
 use coordinator_commons::Restore;
-use futures::Stream;
-use futures::TryStreamExt;
 use sled::Db;
-use std::io;
-use tokio::io::AsyncReadExt;
-use tokio_util::io::StreamReader;
 
 const BACKUPS_DIRECTORY: &str = "user_backups";
 
+/// Holds the user backups in a sled database
+///
+/// TODO(holzeis): This is fine for now, once we grow we should consider moving that into a dedicate
+/// KV database, potentially to a managed service.
 pub struct SledBackup {
     db: Db,
 }
@@ -21,8 +23,13 @@ impl SledBackup {
         }
     }
 
-    pub fn restore(&self, node_id: String) -> Result<Vec<Restore>> {
-        let tree = self.db.open_tree(node_id)?;
+    pub fn restore(&self, node_id: PublicKey, signature: Signature) -> Result<Vec<Restore>> {
+        let message = node_id.to_string().as_bytes().to_vec();
+        let message = orderbook_commons::create_sign_message(message);
+        signature.verify(&message, &node_id)?;
+
+        tracing::debug!(%node_id, "Restoring backup");
+        let tree = self.db.open_tree(node_id.to_string())?;
 
         let mut backup = vec![];
         for entry in tree.into_iter() {
@@ -46,31 +53,23 @@ impl SledBackup {
         Ok(backup)
     }
 
-    pub async fn backup<S: Stream<Item = Result<Bytes, axum::Error>>>(
-        &self,
-        node_id: String,
-        key: String,
-        stream: S,
-    ) -> Result<()> {
-        // Convert the stream into an `AsyncRead`.
-        let stream_with_io_error = stream.map_err(|err| io::Error::new(io::ErrorKind::Other, err));
-        let stream_reader = StreamReader::new(stream_with_io_error);
-        futures::pin_mut!(stream_reader);
+    pub async fn backup(&self, node_id: PublicKey, backup: Backup) -> Result<()> {
+        backup.verify(&node_id)?;
 
-        let mut value = vec![];
-        stream_reader.read_to_end(&mut value).await?;
-
-        tracing::debug!(%node_id, key, "Create user backup");
-
-        let tree = self.db.open_tree(node_id)?;
-        tree.insert(key, value)?;
+        tracing::debug!(%node_id, backup.key, "Create user backup");
+        let tree = self.db.open_tree(node_id.to_string())?;
+        tree.insert(backup.key, backup.value)?;
         tree.flush()?;
         Ok(())
     }
 
-    pub fn delete(&self, node_id: String, key: String) -> Result<()> {
-        let tree = self.db.open_tree(node_id)?;
-        tree.remove(key)?;
+    pub fn delete(&self, node_id: PublicKey, backup: DeleteBackup) -> Result<()> {
+        backup.verify(&node_id)?;
+
+        tracing::debug!(%node_id, key=backup.key, "Deleting user backup");
+
+        let tree = self.db.open_tree(node_id.to_string())?;
+        tree.remove(backup.key)?;
         tree.flush()?;
         Ok(())
     }

@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
 
     let (node_event_sender, mut node_event_receiver) = watch::channel::<Option<Event>>(None);
 
-    let storage = TenTenOneNodeStorage::new(data_dir.to_string_lossy().to_string(), network);
+    let storage = TenTenOneNodeStorage::new(data_dir.to_string_lossy().to_string());
 
     let node_storage = Arc::new(NodeStorage::new(pool.clone()));
 

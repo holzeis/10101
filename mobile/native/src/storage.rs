@@ -1,7 +1,8 @@
 use crate::backup::RemoteBackupClient;
+use crate::cipher::AesCipher;
+use crate::db;
 use bitcoin::hashes::hex::ToHex;
 use bitcoin::secp256k1::SecretKey;
-use bitcoin::secp256k1::SECP256K1;
 use bitcoin::BlockHash;
 use bitcoin::Network;
 use lightning::chain::channelmonitor::ChannelMonitor;
@@ -54,7 +55,7 @@ impl TenTenOneNodeStorage {
 
         let ln_storage = Arc::new(FilesystemPersister::new(data_dir.clone()));
         let dlc_storage = Arc::new(SledStorageProvider::new(&data_dir));
-        let client = RemoteBackupClient::new(secret_key.public_key(SECP256K1));
+        let client = RemoteBackupClient::new(AesCipher::new(secret_key));
 
         TenTenOneNodeStorage {
             ln_storage,
@@ -65,8 +66,45 @@ impl TenTenOneNodeStorage {
             client,
         }
     }
+
+    /// Creates a full backup of the lightning and dlc data.
+    pub async fn full_backup(&self) -> anyhow::Result<()> {
+        tracing::info!("Running full backup");
+        let mut handles = vec![];
+
+        let db_backup = db::backup()?;
+        let value = fs::read(db_backup)?;
+        let handle = self.client.backup("10101/db".to_string(), value);
+        handles.push(handle);
+
+        for ln_backup in self.export()?.into_iter() {
+            let handle = self
+                .client
+                .backup(["ln".to_string(), ln_backup.0].join("/"), ln_backup.1);
+            handles.push(handle);
+        }
+
+        for dlc_backup in self.dlc_storage.export()?.into_iter() {
+            let key = [
+                "dlc",
+                &hex::encode([dlc_backup.0]),
+                &hex::encode(dlc_backup.1),
+            ]
+            .join("/");
+            let handle = self.client.backup(key, dlc_backup.2);
+            handles.push(handle);
+        }
+
+        futures::future::join_all(handles).await;
+
+        tracing::info!("Successfully created a full backup!");
+
+        Ok(())
+    }
 }
 
+// TODO(holzeis): This trait should be implemented on the FilesystemPersister. Note, this should be
+// done by implementing a TenTenOneFilesystemPersister.
 impl LDKStoreReader for TenTenOneNodeStorage {
     fn read_network_graph(&self) -> Option<Vec<u8>> {
         let path = &format!("{}/network_graph", self.data_dir);
@@ -101,46 +139,57 @@ impl LDKStoreReader for TenTenOneNodeStorage {
         self.ln_storage
             .read_channelmonitors(entropy_source, signer_provider)
     }
+
+    fn export(&self) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+        let mut export = vec![];
+        if let Some(manager) = self.read_manager() {
+            export.push(("ln/manager".to_string(), manager));
+        }
+
+        let path = &format!("{}/monitors", self.data_dir);
+        let monitors = fs::read_dir(path)?;
+        for monitor in monitors {
+            let monitor = monitor?;
+            let value = fs::read(monitor.path())?;
+            let key = monitor.file_name().to_string_lossy().to_string();
+            export.push((format!("ln/monitors/{key}"), value));
+        }
+
+        Ok(export)
+    }
 }
 
 impl DLCStoreProvider for TenTenOneNodeStorage {
-    fn read(&self, keys: Vec<String>) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
-        self.dlc_storage.read(keys)
+    fn read(&self, kind: u8, key: Option<Vec<u8>>) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.dlc_storage.read(kind, key)
     }
 
-    fn write(&self, keys: Vec<String>, value: Vec<u8>) -> anyhow::Result<()> {
-        self.dlc_storage.write(keys.clone(), value.clone())?;
+    fn write(&self, kind: u8, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
+        self.dlc_storage.write(kind, key.clone(), value.clone())?;
 
-        tracing::trace!(
-            "Creating a backup of {:?} with value {}",
-            keys,
-            value.to_hex()
-        );
+        let key = ["dlc", &hex::encode([kind]), &hex::encode(key)].join("/");
 
-        let key = keys
-            .into_iter()
-            .filter(|key| !key.is_empty())
-            .collect::<Vec<String>>()
-            .join("/");
-        let key = Path::new("dlc").join(key).to_string_lossy().to_string();
-
-        self.client.backup(key, value);
+        // Let the backup run asynchronously we don't really care if it is successful or not as the
+        // next write may fix the issue. Note, if we want to handle failed backup attempts we
+        // would need to remember those remote handles and handle a failure accordingly.
+        self.client.backup(key, value).forget();
 
         Ok(())
     }
 
-    fn delete(&self, keys: Vec<String>) -> anyhow::Result<()> {
-        self.dlc_storage.delete(keys.clone())?;
+    fn delete(&self, kind: u8, key: Option<Vec<u8>>) -> anyhow::Result<()> {
+        self.dlc_storage.delete(kind, key.clone())?;
 
-        let key = keys
-            .into_iter()
-            .filter(|key| !key.is_empty())
-            .collect::<Vec<String>>()
-            .join("/");
+        let key = match key {
+            Some(key) => ["dlc", &kind.to_hex(), &hex::encode(key)].join("/"),
+            None => ["dlc", &hex::encode([kind])].join("/"),
+        };
 
-        let key = Path::new("dlc").join(key).to_string_lossy().to_string();
-
-        self.client.delete(key);
+        // Let the backup run asynchronously we don't really care if it is successful or not. We may
+        // end up with a key that should have been deleted. That should hopefully not be a problem.
+        // Note, if we want to handle failed backup attempts we would need to remember those
+        // remote handles and handle a failure accordingly.
+        self.client.delete(key).forget();
         Ok(())
     }
 }
@@ -156,9 +205,10 @@ impl KVStorePersister for TenTenOneNodeStorage {
             value.to_hex()
         );
 
-        let key = Path::new("ln").join(key).to_string_lossy().to_string();
-
-        self.client.backup(key, value);
+        // Let the backup run asynchronously we don't really care if it is successful or not as the
+        // next persist will fix the issue. Note, if we want to handle failed backup attempts we
+        // would need to remember those remote handles and handle a failure accordingly.
+        self.client.backup(["ln", key].join("/"), value).forget();
 
         Ok(())
     }

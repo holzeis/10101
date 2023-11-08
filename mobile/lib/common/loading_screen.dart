@@ -26,12 +26,15 @@ class LoadingScreen extends StatefulWidget {
 }
 
 class _LoadingScreenState extends State<LoadingScreen> {
+  String message = "Welcome to 10101";
+
   @override
   void initState() {
     List<Future<dynamic>> futures = [
       Preferences.instance.hasEmailAddress(),
       Preferences.instance.getOpenPosition(),
       isSeedFilePresent(),
+      Preferences.instance.isFullBackupRequired(),
     ];
 
     if (widget.restore != null) {
@@ -43,6 +46,7 @@ class _LoadingScreenState extends State<LoadingScreen> {
       final hasEmailAddress = value[0];
       final position = value[1];
       final isSeedFilePresent = value[2];
+      final isFullBackupRequired = value[3];
 
       FlutterNativeSplash.remove();
 
@@ -50,30 +54,43 @@ class _LoadingScreenState extends State<LoadingScreen> {
         if (!hasEmailAddress) {
           GoRouter.of(context).go(WelcomeScreen.route);
         } else {
-          runBackend(context).then((value) {
-            logger.i("Backend started");
-
-            switch (position) {
-              case StableScreen.label:
-                GoRouter.of(context).go(StableScreen.route);
-              case TradeScreen.label:
-                GoRouter.of(context).go(TradeScreen.route);
-              default:
-                GoRouter.of(context).go(WalletScreen.route);
-            }
-          }).catchError((error) {
-            logger.e("Failed to start backend. $error");
-            showSnackBar(ScaffoldMessenger.of(context), "Failed to start 10101!");
-          });
+          if (isFullBackupRequired) {
+            setState(() => message = "Creating initial backup!");
+            fullBackup().then((value) {
+              Preferences.instance.setFullBackupRequired(false).then((value) {
+                start(context, position);
+              });
+            });
+          } else {
+            start(context, position);
+          }
         }
       } else {
-        // No seed file: let the user choose whether they want to create a new
-        // wallet or import their old one
-        GoRouter.of(context).go(NewWalletScreen.route);
+        Preferences.instance.setFullBackupRequired(false).then((value) {
+          GoRouter.of(context).go(NewWalletScreen.route);
+        });
       }
     });
-
     super.initState();
+  }
+
+  void start(BuildContext context, String? position) {
+    setState(() => message = "Starting 10101");
+    runBackend(context).then((value) {
+      logger.i("Backend started");
+
+      switch (position) {
+        case StableScreen.label:
+          GoRouter.of(context).go(StableScreen.route);
+        case TradeScreen.label:
+          GoRouter.of(context).go(TradeScreen.route);
+        default:
+          GoRouter.of(context).go(WalletScreen.route);
+      }
+    }).catchError((error) {
+      logger.e("Failed to start backend. $error");
+      showSnackBar(ScaffoldMessenger.of(context), "Failed to start 10101!");
+    });
   }
 
   @override
@@ -92,7 +109,7 @@ class _LoadingScreenState extends State<LoadingScreen> {
                 const SizedBox(height: 40),
                 const Center(child: CircularProgressIndicator()),
                 const SizedBox(height: 15),
-                const Text("Starting 10101")
+                Text(message)
               ],
             ))));
   }

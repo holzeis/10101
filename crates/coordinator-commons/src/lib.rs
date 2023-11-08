@@ -202,6 +202,37 @@ pub struct Restore {
     pub value: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct Backup {
+    pub key: String,
+    pub value: Vec<u8>,
+    pub signature: Signature,
+}
+
+impl Backup {
+    /// Verifies if the backup was from the given node id
+    pub fn verify(&self, node_id: &PublicKey) -> anyhow::Result<()> {
+        let message = orderbook_commons::create_sign_message(self.value.clone());
+        self.signature.verify(&message, node_id)?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DeleteBackup {
+    pub key: String,
+    pub signature: Signature,
+}
+
+impl DeleteBackup {
+    pub fn verify(&self, node_id: &PublicKey) -> anyhow::Result<()> {
+        let message = node_id.to_string().as_bytes().to_vec();
+        let message = orderbook_commons::create_sign_message(message);
+        self.signature.verify(&message, node_id)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::calculate_next_expiry;

@@ -29,7 +29,6 @@ use crate::position::models::parse_channel_id;
 use crate::settings::Settings;
 use crate::AppError;
 use autometrics::autometrics;
-use axum::extract::BodyStream;
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::State;
@@ -42,8 +41,11 @@ use axum::Json;
 use axum::Router;
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::hashes::hex::ToHex;
+use bitcoin::secp256k1::ecdsa::Signature;
 use bitcoin::secp256k1::PublicKey;
+use coordinator_commons::Backup;
 use coordinator_commons::CollaborativeRevertData;
+use coordinator_commons::DeleteBackup;
 use coordinator_commons::LspConfig;
 use coordinator_commons::OnboardingParam;
 use coordinator_commons::RegisterParams;
@@ -69,6 +71,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde::Serialize;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -122,10 +125,7 @@ pub fn router(
     Router::new()
         .route("/", get(index))
         .route("/api/version", get(version))
-        .route(
-            "/api/backup/:node_id/*key",
-            post(backup).delete(delete_backup),
-        )
+        .route("/api/backup/:node_id", post(backup).delete(delete_backup))
         .route("/api/restore/:node_id", get(restore))
         .route(
             "/api/prepare_onboarding_payment",
@@ -554,36 +554,54 @@ pub async fn collaborative_revert_confirm(
     Ok(Json(serialize_hex(&raw_tx)))
 }
 
+// TODO(holzeis): There is no reason the backup and restore api has to run on the coordinator. On
+// the contrary it would be much more reasonable to have the backup and restore api run separately.
 pub async fn backup(
-    Path((node_id, key)): Path<(String, String)>,
+    Path(node_id): Path<String>,
     State(state): State<Arc<AppState>>,
-    stream: BodyStream,
+    backup: Json<Backup>,
 ) -> Result<(), AppError> {
+    let node_id = PublicKey::from_str(&node_id)
+        .map_err(|e| AppError::BadRequest(format!("Failed to backup {}. {e:#}", backup.key)))?;
+
     state
         .user_backup
-        .backup(node_id, key, stream)
+        .backup(node_id, backup.0)
         .await
         .map_err(|e| AppError::InternalServerError(e.to_string()))
 }
 
+// TODO(holzeis): There is no reason the backup and restore api has to run on the coordinator. On
+// the contrary it would be much more reasonable to have the backup and restore api run separately.
 pub async fn delete_backup(
-    Path((node_id, key)): Path<(String, String)>,
+    Path(node_id): Path<String>,
     State(state): State<Arc<AppState>>,
+    backup: Json<DeleteBackup>,
 ) -> Result<(), AppError> {
-    tracing::debug!("Deleting user backup of {key} for {node_id}");
+    let node_id = PublicKey::from_str(&node_id).map_err(|e| {
+        AppError::BadRequest(format!("Failed to delete backup {}. {e:#}", backup.key))
+    })?;
+
     state
         .user_backup
-        .delete(node_id, key)
+        .delete(node_id, backup.0)
         .map_err(|e| AppError::InternalServerError(e.to_string()))
 }
 
+// TODO(holzeis): There is no reason the backup and restore api has to run on the coordinator. On
+// the contrary it would be much more reasonable to have the backup and restore api run separately.
 async fn restore(
     Path(node_id): Path<String>,
     State(state): State<Arc<AppState>>,
+    signature: Json<Signature>,
 ) -> Result<Json<Vec<Restore>>, AppError> {
-    let backup = state.user_backup.restore(node_id.clone()).map_err(|e| {
-        AppError::InternalServerError(format!("Failed to restore backup for {node_id}. {e:#}"))
-    })?;
+    let node_id = PublicKey::from_str(&node_id)
+        .map_err(|e| AppError::BadRequest(format!("Failed to restore backup. {e:#}")))?;
+
+    let backup = state
+        .user_backup
+        .restore(node_id, signature.0)
+        .map_err(|e| AppError::InternalServerError(format!("Failed to restore backup. {e:#}")))?;
 
     Ok(Json(backup))
 }
