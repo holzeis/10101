@@ -239,7 +239,7 @@ pub enum IncludeBacktraceOnPanic {
 }
 
 pub fn set_config(config: Config, app_dir: String, seed_dir: String) -> Result<()> {
-    config::set(config, app_dir, seed_dir);
+    crate::state::set_config((config, app_dir, seed_dir).into());
     Ok(())
 }
 
