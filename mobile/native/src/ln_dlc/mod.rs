@@ -415,12 +415,17 @@ pub fn init_new_mnemonic(target_seed_file: &Path) -> Result<()> {
     Ok(())
 }
 
-#[tokio::main(flavor = "current_thread")]
 pub async fn restore_from_mnemonic(seed_words: &str, target_seed_file: &Path) -> Result<()> {
     let seed = Bip39Seed::restore_from_mnemonic(seed_words, target_seed_file)?;
     crate::state::set_seed(seed);
 
-    let storage = get_storage();
+    let storage = TenTenOneNodeStorage::new(
+        config::get_data_dir(),
+        config::get_network(),
+        get_node_key(),
+    );
+    tracing::info!("Initialized 10101 storage!");
+    crate::state::set_storage(storage.clone());
     storage.client.restore(storage.dlc_storage).await
 }
 

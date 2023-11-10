@@ -199,11 +199,7 @@ impl KVStorePersister for TenTenOneNodeStorage {
         self.ln_storage.persist(key, value)?;
 
         let value = value.encode();
-        tracing::trace!(
-            "Creating a backup of {:?} with value {}",
-            key,
-            value.to_hex()
-        );
+        tracing::trace!("Creating a backup of {:?}", key);
 
         // Let the backup run asynchronously we don't really care if it is successful or not as the
         // next persist will fix the issue. Note, if we want to handle failed backup attempts we

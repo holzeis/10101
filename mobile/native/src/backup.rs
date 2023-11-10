@@ -7,7 +7,6 @@ use crate::event::EventType;
 use anyhow::bail;
 use anyhow::ensure;
 use anyhow::Result;
-use bitcoin::hashes::hex::ToHex;
 use coordinator_commons::Backup;
 use coordinator_commons::DeleteBackup;
 use coordinator_commons::Restore;
@@ -129,7 +128,7 @@ impl RemoteBackupClient {
     }
 
     pub fn backup(&self, key: String, value: Vec<u8>) -> RemoteHandle<()> {
-        tracing::trace!("Creating backup for {key} with value {}", value.to_hex());
+        tracing::trace!("Creating backup for {key}");
         let (fut, remote_handle) = {
             let client = self.inner.clone();
             let cipher = self.cipher.clone();
@@ -214,11 +213,7 @@ impl RemoteBackupClient {
                             let decrypted_value = cipher.decrypt(restore.value)?;
                             match restore.kind {
                                 RestoreKind::LN => {
-                                    tracing::debug!(
-                                        "Restoring {} with value {}",
-                                        restore.key,
-                                        decrypted_value.to_hex()
-                                    );
+                                    tracing::debug!("Restoring {}", restore.key);
                                     let dest_file = Path::new(&data_dir)
                                         .join(network.to_string())
                                         .join(restore.key.clone());
@@ -227,11 +222,7 @@ impl RemoteBackupClient {
                                     fs::write(dest_file.as_path(), decrypted_value)?;
                                 }
                                 RestoreKind::DLC => {
-                                    tracing::debug!(
-                                        "Restoring {} with value {}",
-                                        restore.key,
-                                        decrypted_value.to_hex()
-                                    );
+                                    tracing::debug!("Restoring {}", restore.key);
                                     let keys = restore.key.split('/').collect::<Vec<&str>>();
                                     ensure!(keys.len() == 2, "dlc key is too short");
 
